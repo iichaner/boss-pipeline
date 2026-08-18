@@ -1,0 +1,1991 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boss 直聘爬取监控</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+    --text: #e4e6eb; --dim: #8b8d97; --accent: #3b82f6;
+    --green: #22c55e; --red: #ef4444; --yellow: #eab308;
+    --orange: #f97316; --purple: #a855f7;
+    --p-high: #ef4444; --p-mid: #eab308; --p-low: #6b7280;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'SF Pro', 'Helvetica Neue', sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+
+  /* === 顶部状态栏 === */
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--border); }
+  .topbar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.running { background: var(--green); animation: pulse 1.5s infinite; }
+  .status-dot.done { background: var(--dim); }
+  .status-dot.error { background: var(--red); }
+  .status-dot.idle { background: var(--yellow); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .status-text { font-size: 12px; color: var(--dim); }
+
+  /* Session 切换 */
+  .session-select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+  .session-select:focus { outline: none; border-color: var(--accent); }
+
+  /* 路径栏 */
+  .pathbar { display: flex; align-items: center; gap: 8px; padding: 6px 20px; background: var(--bg); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--dim); }
+  .pathbar code { background: var(--card); padding: 2px 6px; border-radius: 3px; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; display: inline-block; }
+  .btn-mini { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: var(--accent); color: #fff; border: none; border-radius: 5px; font-size: 11px; cursor: pointer; }
+  .btn-mini:hover { opacity: 0.85; }
+  .btn-mini.green { background: var(--green); }
+  .btn-mini.cyan { background: #06b6d4; }
+  .btn-mini:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* 筛选器 */
+  .filter-group { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .filter-group label { font-size: 11px; color: var(--dim); }
+  .filter-input { width: 70px; padding: 3px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: 11px; }
+  .filter-input:focus { outline: none; border-color: var(--accent); }
+  .filter-input.wide { width: 120px; }
+  .filter-input::placeholder { color: #555; }
+
+  /* === 主体 === */
+  .main { display: flex; height: calc(100vh - 80px); }
+
+  /* 左侧 Dashboard */
+  .dashboard { width: 280px; min-width: 280px; padding: 12px; overflow-y: auto; border-right: 1px solid var(--border); }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+  .stat-label { font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+  .stat-value { font-size: 22px; font-weight: 700; }
+  .stat-value small { font-size: 13px; font-weight: 400; color: var(--dim); }
+  .progress-bar { height: 5px; background: var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mini-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+  .mini-card .stat-label { font-size: 10px; }
+  .mini-card .stat-value { font-size: 17px; }
+  .loc-list { max-height: 150px; overflow-y: auto; }
+  .loc-item { display: flex; justify-content: space-between; padding: 3px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
+  .loc-item:last-child { border-bottom: none; }
+
+  /* 优先级汇总 */
+  .priority-stats { display: flex; gap: 6px; margin-top: 6px; }
+  .priority-stat { flex: 1; text-align: center; padding: 4px 6px; border-radius: 5px; font-size: 11px; }
+  .priority-stat.high { background: rgba(239,68,68,0.15); color: var(--p-high); }
+  .priority-stat.mid { background: rgba(234,179,8,0.15); color: var(--p-mid); }
+  .priority-stat.low { background: rgba(107,114,128,0.15); color: var(--p-low); }
+  .priority-stat span { font-size: 14px; font-weight: 600; }
+
+  /* 右侧 */
+  .right-panel { flex: 1; display: flex; overflow: hidden; }
+  .job-list { width: 300px; min-width: 300px; overflow-y: auto; border-right: 1px solid var(--border); }
+
+  .job-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; position: relative; }
+  .job-item:hover { background: var(--card); }
+  .job-item.active { background: var(--card); border-left: 3px solid var(--accent); }
+  .job-item.p-high { border-left: 3px solid var(--p-high); }
+  .job-item.p-mid { border-left: 3px solid var(--p-mid); }
+  .job-item.p-low { border-left: 3px solid var(--p-low); }
+
+  .job-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .job-item-title { font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-item-company { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+  .job-item-meta { font-size: 11px; color: var(--dim); display: flex; gap: 8px; margin-bottom: 4px; }
+
+  .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 500; }
+  .badge.ok { background: rgba(34,197,94,0.15); color: var(--green); }
+  .badge.fail { background: rgba(239,68,68,0.15); color: var(--red); }
+  .badge.greet-ok { background: rgba(34,197,94,0.25); color: var(--green); font-size: 9px; }
+  .badge.greet-fail { background: rgba(239,68,68,0.25); color: var(--red); font-size: 9px; }
+  .badge.greet-skip { background: rgba(234,179,8,0.2); color: var(--yellow); font-size: 9px; }
+  .pri-tag.greet-tag-ok { background: rgba(34,197,94,0.15); color: var(--green); }
+  .pri-tag.greet-tag-fail { background: rgba(239,68,68,0.15); color: var(--red); }
+  .pri-tag.greet-tag-skip { background: rgba(234,179,8,0.15); color: var(--yellow); }
+
+  /* 操作行 */
+  .job-actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .btn-priority { padding: 2px 8px; font-size: 10px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; background: transparent; color: var(--dim); transition: all 0.15s; }
+  .btn-priority:hover { opacity: 0.85; }
+  .btn-priority.high { color: var(--p-high); border-color: var(--p-high); }
+  .btn-priority.mid { color: var(--p-mid); border-color: var(--p-mid); }
+  .btn-priority.low { color: var(--p-low); border-color: var(--p-low); }
+  .btn-priority.active-high { background: var(--p-high); color: #fff; border-color: var(--p-high); }
+  .btn-priority.active-mid { background: var(--p-mid); color: #000; border-color: var(--p-mid); }
+  .btn-priority.active-low { background: var(--p-low); color: #fff; border-color: var(--p-low); }
+
+  .btn-greet { padding: 2px 10px; font-size: 10px; border: none; border-radius: 4px; cursor: pointer; background: var(--accent); color: #fff; }
+  .btn-greet:hover { opacity: 0.85; }
+  .btn-greet:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .priority-label { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 500; }
+  .priority-label.high { background: var(--p-high); color: #fff; }
+  .priority-label.mid { background: var(--p-mid); color: #000; }
+  .priority-label.low { background: var(--p-low); color: #fff; }
+
+  /* 列表/详情优先级标签（只读展示） */
+  .pri-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+  .pri-tag.high { background: var(--p-high); color: #fff; }
+  .pri-tag.mid { background: var(--p-mid); color: #000; }
+  .pri-tag.low { background: var(--p-low); color: #fff; }
+  .pri-tag.none { background: var(--border); color: var(--dim); }
+
+  .pri-select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; }
+  .pri-select:focus { outline: none; border-color: var(--accent); }
+
+  #salaryChart { max-height: 200px; overflow-y: auto; }
+  #locList { max-height: 200px; overflow-y: auto; }
+
+  /* 详情判定卡片 */
+  .judge-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+  .judge-card.none { color: var(--dim); font-size: 12px; text-align: center; }
+  .judge-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; font-size: 12px; }
+  .judge-k { color: var(--dim); }
+  .judge-v { color: var(--text); font-weight: 500; }
+  .judge-reason { font-size: 12px; color: var(--dim); line-height: 1.6; border-top: 1px solid var(--border); padding-top: 8px; cursor: help; }
+  .detail-link { font-size: 11px; color: var(--accent); text-decoration: none; margin-left: 4px; }
+  .detail-link:hover { text-decoration: underline; }
+
+  /* 岗位详情 */
+  .job-detail { flex: 1; padding: 16px 20px; overflow-y: auto; }
+  .job-detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--dim); font-size: 13px; }
+  .detail-header { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .detail-header h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .detail-meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+  .detail-meta span { display: flex; align-items: center; gap: 3px; }
+  .detail-desc { font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+  .detail-actions { margin-top: 12px; display: flex; gap: 8px; }
+  .btn-large { padding: 8px 16px; font-size: 13px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
+  .btn-large.greet { background: var(--accent); color: #fff; }
+  .btn-large.greet:hover { opacity: 0.85; }
+  .btn-large.greet:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .loading { text-align: center; padding: 30px; color: var(--dim); font-size: 13px; }
+  .no-data { text-align: center; padding: 30px; color: var(--dim); font-size: 13px; }
+  .conn-badge { font-size: 11px; padding: 2px 6px; border-radius: 3px; }
+  .conn-badge.connected { background: rgba(34,197,94,0.15); color: var(--green); }
+  .conn-badge.disconnected { background: rgba(239,68,68,0.15); color: var(--red); }
+
+  /* === 模态窗口 === */
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .modal-content { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 480px; max-width: 90vw; }
+  .modal-content h3 { margin-bottom: 16px; font-size: 16px; }
+  .form-group { margin-bottom: 12px; }
+  .form-group label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  .form-group input { width: 100%; padding: 8px 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+  .form-group input:focus { outline: none; border-color: var(--accent); }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .countdown-display { text-align: center; padding: 20px; }
+  .countdown-display span { font-size: 16px; color: var(--dim); }
+  .login-status { text-align: center; font-size: 12px; color: var(--dim); margin-top: 8px; }
+
+  /* 侧边栏按钮 */
+  .sidebar-btn { width: 100%; padding: 8px; font-size: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; margin-top: 6px; }
+  .sidebar-btn:hover { opacity: 0.85; }
+  .sidebar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3d4a; }
+</style>
+</head>
+<body>
+
+<!-- 爬取模态窗口 -->
+<div id="crawlModal" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>🕷️ 开始爬取</h3>
+    <div class="form-group">
+      <label>列表页 URL *</label>
+      <input type="text" id="crawlUrl" placeholder="https://www.zhipin.com/web/geek/jobs?query=...">
+    </div>
+    <details style="margin-bottom:12px;font-size:12px">
+      <summary style="cursor:pointer;color:var(--dim)">⚙️ 高级设置（默认即可，不用动）</summary>
+      <div style="margin-top:10px">
+        <div class="form-row">
+          <div class="form-group">
+            <label>最大滚动次数</label>
+            <input type="number" id="crawlMaxScroll" value="50" step="1" min="0">
+          </div>
+          <div class="form-group">
+            <label>最大爬取条数</label>
+            <input type="number" id="crawlMaxJobs" value="300" step="1" min="0">
+          </div>
+          <div class="form-group">
+            <label>详情页等待(秒)</label>
+            <input type="number" id="crawlBaseWait" value="20" step="1" min="1">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>滚动后等待(秒)</label>
+            <input type="number" id="crawlScrollWait" value="5" step="0.5" min="0.5">
+          </div>
+          <div class="form-group">
+            <label>滚动距离(K px)</label>
+            <input type="number" id="crawlScrollDeltaMin" value="1.5" step="0.1" min="0.1" style="width:50px">
+            <span style="color:var(--dim);font-size:11px">-</span>
+            <input type="number" id="crawlScrollDeltaMax" value="2.5" step="0.1" min="0.1" style="width:50px">
+          </div>
+          <div class="form-group">
+            <label>详情页波动(秒)</label>
+            <input type="number" id="crawlDetailJitter" value="3" step="0.5" min="0">
+          </div>
+        </div>
+        <div class="form-row" style="margin-bottom:12px">
+          <div class="form-group">
+            <label>条间间隔(秒)</label>
+            <input type="number" id="crawlJobGapMin" value="1.0" step="0.1" min="0" style="width:55px">
+            <span style="color:var(--dim);font-size:11px">-</span>
+            <input type="number" id="crawlJobGapMax" value="3.0" step="0.1" min="0" style="width:55px">
+          </div>
+        </div>
+      </div>
+    </details>
+    <div class="form-group">
+      <label>任务名称（留空自动生成）</label>
+      <input type="text" id="crawlSessionName" placeholder="自动生成">
+    </div>
+
+    <!-- 登录检查区域（初始隐藏）：启动浏览器后检查一次登录状态 -->
+    <div id="loginWait" style="display:none">
+      <div class="login-status" id="loginStatus" style="font-size:13px;margin-bottom:12px">检查中...</div>
+      <button class="btn-mini" id="btnGoHome" style="width:100%;margin-bottom:6px;background:var(--yellow);color:#000;border:none"
+              onclick="goBossHome()">🏠 回到 Boss 主页登录</button>
+      <button class="btn-large" id="btnLoginDone" style="background:var(--green);color:#fff;width:100%;margin-bottom:6px;opacity:0.5;cursor:not-allowed"
+              onclick="confirmLoggedIn()" disabled>✅ 已登录，重新检查</button>
+      <button class="btn-mini" id="btnSkipLogin" style="width:100%;margin-top:2px;background:transparent;color:var(--dim);border:1px solid var(--border)"
+              onclick="skipWait()">跳过检查，直接开始</button>
+    </div>
+
+    <div class="modal-actions" id="crawlActions">
+      <button class="btn-mini" onclick="closeCrawlModal()">取消</button>
+      <button class="btn-mini green" onclick="startCrawl()">确认开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 打招呼确认模态窗口 -->
+<div id="greetModal" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>💬 执行打招呼</h3>
+    <div id="greetInfo" style="margin-bottom:16px;font-size:13px;color:var(--dim)">加载中...</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);margin-bottom:16px;cursor:pointer">
+      <input type="checkbox" id="greetFirstOne" checked>
+      先试第一条（推荐首次使用：先发送 1 条确认能成功，再批量）
+    </label>
+    <div class="modal-actions">
+      <button class="btn-mini" onclick="closeGreetModal()">取消</button>
+      <button class="btn-mini green" onclick="confirmGreet()">确认执行</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast 通知 -->
+<div id="toast" style="display:none;position:fixed;top:60px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:12px 24px;border-radius:8px;z-index:2000;font-size:13px;transition:opacity 0.3s"></div>
+
+<!-- 导入判定结果模态窗口 -->
+<div id="importModal" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>📥 导入判定结果</h3>
+    <div id="importFileList" style="margin-bottom:16px;font-size:13px;color:var(--dim);max-height:300px;overflow-y:auto">加载中...</div>
+    <div class="modal-actions">
+      <button class="btn-mini" onclick="closeImportModal()">取消</button>
+      <button class="btn-mini green" onclick="confirmImport()">导入选中</button>
+    </div>
+  </div>
+</div>
+
+<div class="topbar">
+  <div class="status-dot" id="statusDot"></div>
+  <h1>Boss 直聘求职助手</h1>
+  <button class="btn-mini" onclick="toggleUseGuide()" style="background:#f59e0b;color:#fff;font-weight:600" title="第一次使用请看这里">📖 使用说明</button>
+  <span class="status-text" id="statusText">连接中...</span>
+  <select class="session-select" id="sessionSelect" title="切换爬取 session">
+    <option value="">加载中...</option>
+  </select>
+  <button class="btn-mini green" id="btnStartCrawl" onclick="showCrawlModal()">🕷️ 新建爬取任务</button>
+  <button class="btn-mini" onclick="toggleStatsView()" style="background:#6366f1;color:#fff">📊 全局统计</button>
+  <button class="btn-mini cyan" onclick="openBossMessage()">💬 消息</button>
+  <button class="btn-mini" id="btnStopCrawl" onclick="stopCrawl()" style="display:none;background:var(--red)">⏹ 停止</button>
+  <span id="connStatus" style="color:var(--yellow);font-size:11px">检查连接中...</span>
+  <span id="lastUpdate" style="margin-left:auto;font-size:11px;color:var(--dim)">-</span>
+</div>
+
+<div class="envbar" style="display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--card);border-bottom:1px solid var(--border);flex-wrap:wrap">
+  <span style="font-size:12px;font-weight:600">① 准备环境</span>
+  <button class="btn-mini" id="btnStartBrowser" onclick="startBrowser()" style="background:var(--green);color:#fff">🚀 启动浏览器</button>
+  <span style="font-size:11px;color:var(--dim)">浏览器: <span id="envBrowserDot" class="status-dot idle" style="display:inline-block;vertical-align:middle"></span> <span id="envBrowserText">检查中...</span></span>
+  <span style="font-size:11px;color:var(--dim)">登录: <span id="envLoginDot" class="status-dot idle" style="display:inline-block;vertical-align:middle"></span> <span id="envLoginText">检查中...</span></span>
+  <span style="flex:1"></span>
+  <div style="display:flex;align-items:center;gap:6px;font-size:11px">
+    <span style="font-weight:600">求职流程</span>
+    <span class="flow-step" id="flowEnv" style="padding:3px 10px;border-radius:12px;border:1px solid var(--border);color:var(--dim)">① 环境</span>
+    <span style="color:var(--dim)">→</span>
+    <span class="flow-step" id="flowCrawl" style="padding:3px 10px;border-radius:12px;border:1px solid var(--border);color:var(--dim)">② 爬取</span>
+    <span style="color:var(--dim)">→</span>
+    <span class="flow-step" id="flowJudge" style="padding:3px 10px;border-radius:12px;border:1px solid var(--border);color:var(--dim)">③ 判定</span>
+    <span style="color:var(--dim)">→</span>
+    <span class="flow-step" id="flowGreet" style="padding:3px 10px;border-radius:12px;border:1px solid var(--border);color:var(--dim)">④ 打招呼</span>
+  </div>
+</div>
+
+<div class="pathbar">
+  <button class="btn-mini green" id="btnOpenFolder" onclick="openFolder()">打开源数据</button>
+  <button class="btn-mini cyan" id="btnCopyUrl" onclick="copySearchUrl()" title="复制列表页链接">🔗 复制列表页链接</button>
+  <div class="filter-group">
+    <label>地区:</label>
+    <input class="filter-input wide" id="filterRegion" list="regionOptions" placeholder="选择或输入地区" oninput="applyFilters()">
+<datalist id="regionOptions"></datalist>
+  </div>
+  <div class="filter-group">
+    <label>薪资:</label>
+    <input class="filter-input" id="filterSalaryMin" placeholder="15" oninput="applyFilters()" onfocus="enableSalaryFilter()">
+    <span style="color:var(--dim);font-size:11px">-</span>
+    <input class="filter-input" id="filterSalaryMax" placeholder="20" oninput="applyFilters()" onfocus="enableSalaryFilter()">
+    <span style="color:var(--dim);font-size:10px">K</span>
+  </div>
+  <div class="filter-group">
+    <label>优先级:</label>
+    <select class="filter-input" id="filterPriority" onchange="applyFilters()">
+      <option value="">全部</option>
+      <option value="高">🔴 高优先</option>
+      <option value="中">🟡 中优先</option>
+      <option value="低">⚪ 低优先</option>
+      <option value="none">○ 未判定</option>
+    </select>
+  </div>
+  <span id="jobCountDisplay" style="margin-left:8px;font-size:11px;color:var(--dim)"></span>
+</div>
+
+<div class="main">
+  <div class="dashboard">
+    <div class="stat-card">
+      <div class="stat-label">累计已爬 / 列表页岗位数</div>
+      <div class="stat-value"><span id="scraped">0</span> <small>/ <span id="listTotal">0</span></small></div>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+      <button class="sidebar-btn" id="btnResumeCrawl" style="display:none;background:var(--green);color:#fff;margin-top:8px;font-size:11px"
+              onclick="resumeCrawl()">📋 继续爬取 (0/0)</button>
+      <button class="sidebar-btn" id="btnSkipScroll" style="display:none;background:var(--orange);color:#fff;margin-top:6px;font-size:11px"
+              onclick="skipScroll()">⏩ 跳过滚动，直接爬取</button>
+    </div>
+
+    <div class="grid-2">
+      <div class="mini-card"><div class="stat-label">成功率</div><div class="stat-value"><span id="successRate">0%</span></div></div>
+      <div class="mini-card"><div class="stat-label">平均耗时</div><div class="stat-value"><span id="avgTime">0</span><small>s/条</small></div></div>
+    </div>
+
+    <div class="grid-2" style="margin-top:8px">
+      <div class="mini-card"><div class="stat-label">平均薪资</div><div class="stat-value"><span id="avgSalary">-</span><small>K</small></div></div>
+      <div class="mini-card"><div class="stat-label">已用时间</div><div class="stat-value" style="font-size:14px"><span id="elapsed">00:00:00</span></div></div>
+    </div>
+
+    <div class="stat-card" style="margin-top:8px">
+      <div class="stat-label">优先级分布</div>
+      <div class="priority-stats">
+        <div class="priority-stat high"><span id="priHigh">0</span> 高</div>
+        <div class="priority-stat mid"><span id="priMid">0</span> 中</div>
+        <div class="priority-stat low"><span id="priLow">0</span> 低</div>
+      </div>
+    </div>
+
+    <div class="stat-card" style="margin-top:8px">
+      <div class="stat-label">薪资分布（K）</div>
+      <div id="salaryChart" style="max-height:200px;overflow-y:auto;padding:4px 0"><div class="no-data">暂无数据</div></div>
+    </div>
+
+    <div class="stat-card" style="margin-top:8px">
+      <div class="stat-label">地区分布</div>
+      <div class="loc-list" id="locList" style="max-height:200px;overflow-y:auto"><div class="no-data">暂无数据</div></div>
+    </div>
+
+    <!-- T5: 一键判定按钮 -->
+    <div class="stat-card" style="margin-top:8px">
+      <button class="sidebar-btn" style="background:var(--accent);color:#fff" onclick="invokeAgent()">
+        🤖 一键判定（复制提示词到剪贴板）
+      </button>
+    </div>
+
+    <!-- 判定结果导入 -->
+    <div class="stat-card" style="margin-top:8px">
+      <div class="stat-label">判定来源</div>
+      <div id="judgeSource" style="font-size:11px;color:var(--dim);margin-bottom:6px;word-break:break-all">加载中...</div>
+      <button class="sidebar-btn" style="background:#06b6d4;color:#fff" onclick="showImportModal()">📥 导入判定结果</button>
+    </div>
+
+    <!-- T7: 打招呼按钮 -->
+    <div class="stat-card" style="margin-top:8px">
+      <button class="sidebar-btn" style="background:var(--purple);color:#fff" id="btnGreet" onclick="showGreetModal()">
+        💬 执行打招呼
+      </button>
+      <div id="greetProgress" style="display:none;margin-top:8px;font-size:11px;color:var(--dim)"></div>
+    </div>
+
+    <!-- 打招呼语来源 -->
+    <div class="stat-card" style="margin-top:8px">
+      <div class="stat-label">打招呼语来源</div>
+      <div id="greetingSource" style="font-size:11px;color:var(--dim);margin-bottom:6px;word-break:break-all;position:relative"
+           onmouseenter="showGreetingPreview(event)" onmouseleave="hideGreetingPreview()">加载中...</div>
+      <button class="sidebar-btn" style="background:#38bdf8;color:#fff;font-size:11px" onclick="openGreetingFile()">📝 编辑打招呼语</button>
+    </div>
+
+    <!-- 悬停预览气泡 -->
+    <div id="greetingPreview" style="display:none;position:fixed;background:var(--card);border:1px solid var(--accent);border-radius:8px;padding:12px 16px;max-width:380px;max-height:300px;overflow-y:auto;z-index:2100;font-size:12px;line-height:1.7;white-space:pre-wrap;color:var(--text);box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none"></div>
+  </div>
+  <div class="right-panel">
+    <div class="job-list" id="jobList"><div class="loading">加载中...</div></div>
+    <div class="job-detail" id="jobDetail">
+      <div class="job-detail-empty">点击左侧岗位查看详情</div>
+    </div>
+  </div>
+</div>
+
+<!-- 全局统计视图 -->
+<div id="statsView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1500;overflow-y:auto;padding:24px">
+  <div style="max-width:960px;margin:0 auto;background:var(--card);border-radius:12px;padding:24px;border:1px solid var(--border)">
+    <div style="display:flex;align-items:center;margin-bottom:16px">
+      <h2 style="flex:1;font-size:18px">📊 全局统计（全部历史任务）</h2>
+      <button class="btn-mini" onclick="toggleStatsView()">关闭</button>
+    </div>
+    <div id="statsContent"><div class="no-data">加载中...</div></div>
+  </div>
+</div>
+
+<script>
+// === 全局统计 ===
+function toggleUseGuide() {
+  const el = document.getElementById('useGuide');
+  el.style.display = el.style.display === 'flex' ? 'none' : 'flex';
+}
+
+let statsViewOpen = false;
+function toggleStatsView() {
+  statsViewOpen = !statsViewOpen;
+  document.getElementById('statsView').style.display = statsViewOpen ? 'block' : 'none';
+  if (statsViewOpen) loadGlobalStats();
+}
+async function loadGlobalStats() {
+  const el = document.getElementById('statsContent');
+  const d = await api('api/stats/global');
+  if (!d || d.error) { el.innerHTML = '<div class="no-data">无统计数据</div>'; return; }
+
+  const dist = d.judgment_dist || {};
+  const hi = dist['高'] || 0, mid = dist['中'] || 0, lo = dist['低'] || 0;
+  const distTotal = (hi + mid + lo) || 1;
+  const pctHi = hi / distTotal * 100, pctMid = mid / distTotal * 100, pctLo = lo / distTotal * 100;
+  const greet = d.greet || {};
+  const avgTime = d.avg_time || 0;
+  const avgSalary = d.avg_salary;
+  const highMidRatio = d.high_mid_ratio || 0;
+
+  // 1. 大数字卡片（5 个）
+  const bigCards = [
+    ['总体岗位数', d.total_crawled_unique || 0, ''],
+    ['平均耗时', avgTime, 's/条'],
+    ['平均薪资', (avgSalary != null ? avgSalary : '-'), 'K'],
+    ['打招呼数', greet.success || 0, ''],
+    ['中高优先级占比', highMidRatio + '%', '']
+  ];
+  const bigHtml = bigCards.map(function(c){
+    return '<div class="mini-card" style="text-align:center;padding:16px 8px">' +
+      '<div class="stat-label">' + c[0] + '</div>' +
+      '<div class="stat-value" style="font-size:28px;font-weight:700;line-height:1.3">' + c[1] +
+      (c[2] ? '<small style="font-size:11px;font-weight:400">' + c[2] + '</small>' : '') + '</div></div>';
+  }).join('');
+
+  // 2a. 优先级分布：百分比条 + 圆饼图
+  const priBar = function(name, val, pct, color){
+    return '<div style="display:flex;align-items:center;gap:8px;margin:6px 0;font-size:12px">' +
+      '<span style="width:20px">' + name + '</span>' +
+      '<div style="flex:1;height:14px;background:var(--border);border-radius:4px;overflow:hidden">' +
+        '<div style="height:100%;width:' + pct.toFixed(1) + '%;background:' + color + '"></div></div>' +
+      '<span style="width:80px;text-align:right;color:var(--dim)">' + val + ' 条 · ' + pct.toFixed(1) + '%</span></div>';
+  };
+  const pieHtml = '<div style="width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--p-high) 0% ' + pctHi.toFixed(1) + '%, var(--p-mid) ' + pctHi.toFixed(1) + '% ' + (pctHi+pctMid).toFixed(1) + '%, var(--p-low) ' + (pctHi+pctMid).toFixed(1) + '% 100%);margin:0 auto"></div>';
+
+  // 2b. 薪资分布横向条
+  const sb = d.salary_buckets || {};
+  const sbKeys = Object.keys(sb).sort(function(a,b){ return (parseInt(a)||0) - (parseInt(b)||0); });
+  const sbMax = Math.max.apply(null, sbKeys.map(function(k){ return sb[k]; }).concat([1]));
+  const salaryHtml = sbKeys.length ? sbKeys.map(function(k){
+    return '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:11px">' +
+      '<span style="width:56px;text-align:right;color:var(--dim)">' + esc(k) + '</span>' +
+      '<div style="flex:1;height:12px;background:var(--border);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + Math.round(sb[k]/sbMax*100) + '%;background:var(--accent)"></div></div>' +
+      '<span style="width:26px;text-align:right">' + sb[k] + '</span></div>';
+  }).join('') : '<div class="no-data">暂无数据</div>';
+
+  // 2c. 地区分布横向条
+  const loc = d.location_stats || {};
+  const locArr = Object.entries(loc).sort(function(a,b){ return b[1]-a[1]; });
+  const locMax = Math.max.apply(null, locArr.map(function(x){ return x[1]; }).concat([1]));
+  const locHtml = locArr.length ? locArr.slice(0,20).map(function(x){
+    return '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:11px">' +
+      '<span style="width:72px;text-align:right;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(x[0]) + '</span>' +
+      '<div style="flex:1;height:12px;background:var(--border);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;width:' + Math.round(x[1]/locMax*100) + '%;background:#22d3ee"></div></div>' +
+      '<span style="width:26px;text-align:right">' + x[1] + '</span></div>';
+  }).join('') : '<div class="no-data">暂无数据</div>';
+
+  // 2d. 每日爬取数量折线图
+  const trend = d.daily_trend || {};
+  const tk = Object.keys(trend).sort();
+  function lineChart(){
+    if (!tk.length) return '<div class="no-data">暂无数据</div>';
+    const vals = tk.map(function(k){ return trend[k]; });
+    const max = Math.max.apply(null, vals.concat([1]));
+    const W = 480, H = 150, padL = 36, padR = 12, padT = 16, padB = 24;
+    const iw = W - padL - padR, ih = H - padT - padB;
+    const stepX = tk.length > 1 ? iw / (tk.length - 1) : 0;
+    const pts = vals.map(function(v, i){
+      return (padL + i*stepX).toFixed(0) + ',' + (padT + ih - (v/max)*ih).toFixed(0);
+    });
+    const poly = pts.join(' ');
+    const dots = vals.map(function(v, i){
+      const xy = pts[i].split(',');
+      return '<circle cx="' + xy[0] + '" cy="' + xy[1] + '" r="3" fill="var(--accent)"></circle>' +
+        '<text x="' + xy[0] + '" y="' + (parseFloat(xy[1]) - 7) + '" font-size="9" text-anchor="middle" fill="var(--dim)">' + v + '</text>';
+    }).join('');
+    const xLabels = tk.map(function(k, i){
+      const x = padL + i*stepX;
+      return '<text x="' + x.toFixed(0) + '" y="' + (H - 6) + '" font-size="8" text-anchor="middle" fill="var(--dim)">' + k.slice(5) + '</text>';
+    }).join('');
+    return '<svg width="100%" viewBox="0 0 ' + W + ' ' + H + '">' +
+      '<line x1="' + padL + '" y1="' + (padT + ih) + '" x2="' + (W - padR) + '" y2="' + (padT + ih) + '" stroke="var(--border)" stroke-width="1"></line>' +
+      '<polyline points="' + poly + '" fill="none" stroke="var(--accent)" stroke-width="2"></polyline>' +
+      dots + xLabels + '</svg>';
+  }
+
+  // 3a. 重复岗位折叠（默认 5 个）
+  const dup = d.dup_jobs || [];
+  function dupRow(j){ return '<div style="font-size:11px;margin:2px 0">' + esc(j.job_id) + ' × ' + j.count + ' 次 (' + esc((j.sessions||[]).join(', ')) + ')</div>'; }
+  let dupHtml = '<div class="no-data">无重复岗位</div>';
+  if (dup.length) {
+    dupHtml = dup.slice(0,5).map(dupRow).join('') +
+      (dup.length > 5
+        ? '<div id="dupMore" style="display:none">' + dup.slice(5).map(dupRow).join('') + '</div>' +
+          '<button class="btn-mini" style="font-size:11px;margin-top:4px" data-target="dupMore" data-full="展开全部 ' + dup.length + ' 个 ▾" onclick="toggleMore(this)">展开全部 ' + dup.length + ' 个 ▾</button>'
+        : '');
+  }
+
+  // 3b. 任务明细折叠（默认 5 行）
+  function sessRow(s){
+    return '<tr>' +
+      '<td style="padding:5px 8px;font-size:11px">' + esc(s.id) + '</td>' +
+      '<td style="padding:5px 8px;font-size:11px;text-align:center">' + s.crawled + '</td>' +
+      '<td style="padding:5px 8px;font-size:11px;text-align:center">' + s.judged + '</td>' +
+      '<td style="padding:5px 8px;font-size:11px;text-align:center">' + s.high + ' / ' + s.medium + ' / ' + s.low + '</td>' +
+      '<td style="padding:5px 8px;font-size:11px;text-align:center">' + s.greet_success + '</td></tr>';
+  }
+  function sessTable(list){
+    return '<table style="width:100%;border-collapse:collapse;margin-top:8px">' +
+      '<tr style="background:var(--bg)"><th style="padding:5px 8px;font-size:11px;text-align:left">任务</th>' +
+      '<th style="padding:5px 8px;font-size:11px">爬取</th><th style="padding:5px 8px;font-size:11px">判定</th>' +
+      '<th style="padding:5px 8px;font-size:11px">高/中/低</th><th style="padding:5px 8px;font-size:11px">已打</th></tr>' +
+      list.map(sessRow).join('') + '</table>';
+  }
+  const sess = d.sessions || [];
+  let sessHtml = '<div class="no-data">暂无</div>';
+  if (sess.length) {
+    sessHtml = sessTable(sess.slice(0,5)) +
+      (sess.length > 5
+        ? '<div id="sessMore" style="display:none">' + sessTable(sess.slice(5)) + '</div>' +
+          '<button class="btn-mini" style="font-size:11px;margin-top:4px" data-target="sessMore" data-full="展开全部 ' + sess.length + ' 行 ▾" onclick="toggleMore(this)">展开全部 ' + sess.length + ' 行 ▾</button>'
+        : '');
+  }
+
+  el.innerHTML =
+    '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px">' + bigHtml + '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
+      '<div class="stat-card"><div class="stat-label">优先级分布（高/中/低）</div>' +
+        '<div style="display:flex;align-items:center;gap:16px">' +
+          '<div style="flex:1">' + priBar('高', hi, pctHi, 'var(--p-high)') + priBar('中', mid, pctMid, 'var(--p-mid)') + priBar('低', lo, pctLo, 'var(--p-low)') + '</div>' +
+          '<div style="text-align:center;flex-shrink:0">' + pieHtml + '</div>' +
+        '</div></div>' +
+      '<div class="stat-card"><div class="stat-label">每日爬取数量（去重）</div>' + lineChart() + '</div>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">' +
+      '<div class="stat-card"><div class="stat-label">薪资分布（K）</div>' + salaryHtml + '</div>' +
+      '<div class="stat-card"><div class="stat-label">地区分布（区）</div>' + locHtml + '</div>' +
+    '</div>' +
+    '<div class="stat-card" style="margin-top:16px"><div class="stat-label">任务明细（' + sess.length + ' 个任务）</div>' + sessHtml + '</div>' +
+    '<div class="stat-card" style="margin-top:16px"><div class="stat-label">跨任务重复岗位（' + dup.length + ' 个）</div>' + dupHtml + '</div>';
+}
+
+// 展开/收缩辅助（重复岗位 / 任务明细共用）
+function toggleMore(btn) {
+  const id = btn.getAttribute('data-target');
+  const full = btn.getAttribute('data-full') || '展开全部';
+  const el = document.getElementById(id);
+  if (el.style.display === 'none') { el.style.display = 'block'; btn.textContent = '收起 ▴'; }
+  else { el.style.display = 'none'; btn.textContent = full; }
+}
+
+
+// === 配置 ===
+// 轻量级状态管理（可选使用，与现有全局变量共存）
+var AppState = {
+  data: {
+    currentSession: '',
+    jobs: [],
+    priorities: {},
+    greetStatus: {},
+    browserConnected: false,
+    crawlRunning: false
+  },
+  listeners: [],
+  
+  setState: function(updates) {
+    Object.assign(this.data, updates);
+    this.notify();
+  },
+  
+  subscribe: function(listener) {
+    this.listeners.push(listener);
+    return this.listeners.length - 1;
+  },
+  
+  unsubscribe: function(index) {
+    this.listeners.splice(index, 1);
+  },
+  
+  notify: function() {
+    var self = this;
+    this.listeners.forEach(function(fn) {
+      try {
+        fn(self.data);
+      } catch(e) {
+        console.error('状态监听器错误：', e);
+      }
+    });
+  }
+};
+
+const POLL_INTERVAL = 2000;
+const JOBS_POLL = 3000;
+let currentSession = '';
+let currentJobs = [];
+let allJobs = [];
+let selectedJobId = null;
+let jobDescriptions = {};
+let currentDir = '';
+let sessionSearchUrls = {};
+let greetByJob = {};      // job_id -> {result, error, time}，来自 /api/greet/status
+
+// 爬取倒计时相关
+let crawlCountdown = null;
+let loginCheckInterval = null;
+let pendingCrawlParams = null;  // 保存爬取参数，登录确认后使用
+
+// === 工具 ===
+function esc(text) {
+  const d = document.createElement('div');
+  d.textContent = text || '';
+  return d.innerHTML;
+}
+function fmtTime(sec) {
+  if (!sec && sec !== 0) return '-';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+function sessionParam() {
+  return currentSession ? '&session=' + encodeURIComponent(currentSession) : '';
+}
+
+function showToast(msg, duration) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.style.display = 'none', 300); }, duration || 3000);
+}
+
+// === API 调用 ===
+async function api(path, method='GET', body) {
+  const sp = sessionParam();
+  let url = path;
+  if (method === 'GET') {
+    url += '?' + 't=' + Date.now() + sp;
+  } else if (sp) {
+    url += '?' + sp.slice(1);
+  }
+  const opts = { method, headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) {
+      // HTTP错误（4xx, 5xx）
+      console.error('API错误：' + url + ' HTTP ' + r.status);
+      toast('❌ 请求失败: ' + path + ' (HTTP ' + r.status + ')', true);
+      return null;
+    }
+    return await r.json();
+  } catch(e) {
+    // 网络错误或解析错误
+    console.error('网络错误：' + url, e);
+    toast('❌ 网络错误: ' + path + ' - ' + e.message, true);
+    return null;
+  }
+}
+
+function toast(msg, isError=false) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.style.background = isError ? 'var(--red)' : 'var(--green)';
+  t.style.display = 'block';
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 2500);
+}
+
+// === 环境状态 + 流程指引 ===
+let envBrowserOk = false;
+let envLoginOk = false;
+async function refreshEnvStatus() {
+  const bs = await api('api/browser/status');
+  envBrowserOk = !!(bs && bs.running);
+  const bDot = document.getElementById('envBrowserDot');
+  const bText = document.getElementById('envBrowserText');
+  if (envBrowserOk) {
+    bDot.className = 'status-dot running'; bText.textContent = '已启动';
+    bText.style.color = 'var(--green)';
+  } else {
+    bDot.className = 'status-dot error'; bText.textContent = '未启动';
+    bText.style.color = 'var(--red)';
+  }
+  const lg = await api('api/check-login');
+  envLoginOk = !!(lg && lg.logged_in);
+  const lDot = document.getElementById('envLoginDot');
+  const lText = document.getElementById('envLoginText');
+  if (envLoginOk) {
+    lDot.className = 'status-dot running'; lText.textContent = '已登录';
+    lText.style.color = 'var(--green)';
+  } else {
+    lDot.className = 'status-dot idle'; lText.textContent = '未登录（点「启动浏览器」后扫码）';
+    lText.style.color = 'var(--yellow)';
+  }
+  updateFlowGuide();
+}
+function setFlowStep(id, state) {
+  // state: done(绿) / active(橙) / todo(灰)
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (state === 'done') { el.style.background = 'rgba(34,197,94,0.2)'; el.style.color = 'var(--green)'; el.style.borderColor = 'var(--green)'; }
+  else if (state === 'active') { el.style.background = 'rgba(249,115,22,0.2)'; el.style.color = 'var(--orange)'; el.style.borderColor = 'var(--orange)'; }
+  else { el.style.background = 'transparent'; el.style.color = 'var(--dim)'; el.style.borderColor = 'var(--border)'; }
+}
+function updateFlowGuide() {
+  const hasJobs = allJobs && allJobs.length > 0;
+  const hasJudge = !!(document.getElementById('judgeSource') && document.getElementById('judgeSource').textContent.indexOf('当前') === 0);
+  const hasGreet = Object.keys(greetByJob || {}).length > 0;
+  const envReady = envBrowserOk && envLoginOk;
+  setFlowStep('flowEnv', envReady ? 'done' : 'active');
+  if (!envReady) { setFlowStep('flowCrawl', 'todo'); setFlowStep('flowJudge', 'todo'); setFlowStep('flowGreet', 'todo'); return; }
+  setFlowStep('flowCrawl', hasJobs ? 'done' : 'active');
+  if (!hasJobs) { setFlowStep('flowJudge', 'todo'); setFlowStep('flowGreet', 'todo'); return; }
+  setFlowStep('flowJudge', hasJudge ? 'done' : 'active');
+  if (!hasJudge) { setFlowStep('flowGreet', 'todo'); return; }
+  setFlowStep('flowGreet', hasGreet ? 'done' : 'active');
+}
+
+async function startBrowser() {
+  const btn = document.getElementById('btnStartBrowser');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '🚀 启动中...';
+  try {
+    const res = await api('api/browser/start', 'POST', {});
+    if (res && res.ok) {
+      toast('✅ 浏览器已启动，正在打开 Boss 推荐页...');
+      // 启动后导航到 Boss 推荐页（用户指定地址）
+      await api('api/browser/navigate', 'POST', { url: 'https://www.zhipin.com/web/geek/recommend?ka=header-username' });
+      toast('✅ 浏览器已启动并打开 Boss 推荐页（CDP 9222 就绪）');
+    } else {
+      toast('⚠️ 启动失败: ' + (res && res.error ? res.error : '未知'), true);
+    }
+  } catch(e) {
+    toast('⚠️ 请求失败: ' + e, true);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+// === Session 管理 ===
+async function loadSessions() {
+  const data = await api('sessions');
+  if (!data) return;
+  const sel = document.getElementById('sessionSelect');
+  sel.innerHTML = '';
+  data.sessions.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    var badge = '';
+    if (s.status === 'error') badge = '⚠️ ';
+    else if (s.status === 'running' && s.jobCount === 0) badge = '⏳ ';
+    opt.textContent = badge + s.label + ' (' + s.jobCount + '条)';
+    sel.appendChild(opt);
+    sessionSearchUrls[s.id] = s.searchUrl || s.crawlUrl || '';
+  });
+  if (data.current) {
+    const existing = Array.from(sel.options).find(o => o.value === data.current);
+    if (existing) {
+      existing.selected = true;
+      currentSession = data.current;
+    }
+  }
+  sel.onchange = () => {
+    currentSession = sel.value;
+    jobDescriptions = {};
+    pollProgress();
+    pollJobs();
+    updateJudgeSource();
+    updateGreetingSource();
+    pollGreetStatus();
+  };
+  if (currentSession) {
+    jobDescriptions = {};
+    pollProgress();
+    pollJobs();
+    updateJudgeSource();
+    updateGreetingSource();
+  }
+}
+
+// === Dashboard ===
+function updateDashboard(data) {
+  document.getElementById('connStatus').textContent = '已连接';
+  document.getElementById('connStatus').className = 'conn-badge connected';
+
+  const dot = document.getElementById('statusDot');
+  const labels = {running:'爬取中', done:'已完成', error:'出错', idle:'等待中'};
+  dot.className = 'status-dot ' + (data.status || 'idle');
+  document.getElementById('statusText').textContent = labels[data.status] || data.status;
+
+  document.getElementById('scraped').textContent = data.scraped || 0;
+  document.getElementById('listTotal').textContent = data.list_total || 0;
+  const pct = data.list_total > 0 ? Math.min(100, Math.round((data.scraped / data.list_total) * 100)) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+
+  const rate = data.scraped > 0 ? Math.round((data.success / data.scraped) * 100) : 0;
+  document.getElementById('successRate').textContent = rate + '%';
+  document.getElementById('avgTime').textContent = data.avg_seconds_per_job || 0;
+  const avgS = data.salary_stats?.avg;
+  document.getElementById('avgSalary').textContent = avgS ? avgS.toFixed(1) : '-';
+  document.getElementById('elapsed').textContent = fmtTime(data.elapsed_seconds);
+  if (data.updated_at) document.getElementById('lastUpdate').textContent = '更新: ' + data.updated_at.split('T')[1];
+
+  // 续爬/跳过滚动按钮控制
+  const resumeBtn = document.getElementById('btnResumeCrawl');
+  const skipBtn = document.getElementById('btnSkipScroll');
+  var csvCnt = (allJobs && allJobs.length) ? allJobs.length : 0;
+  var showDone = Math.max(data.scraped || 0, csvCnt);
+  var showTotal = data.list_total || csvCnt || 0;
+  // done 但未完（限量爬取/中途停止）→ 仍然显示续爬
+  var incomplete = showDone < showTotal || showTotal === 0;
+  if (incomplete || data.status === 'running' || data.status === 'error') {
+    resumeBtn.style.display = 'block';
+    resumeBtn.dataset.mode = showTotal > 0 ? 'resume' : 'redo';
+    resumeBtn.textContent = (showTotal > 0 ? '📋 继续爬取 (' + showDone + '/' + showTotal + ')' : '📋 重新爬取');
+  } else {
+    resumeBtn.style.display = 'none';
+  }
+  skipBtn.style.display = data.status === 'running' ? 'block' : 'none';
+
+  // 薪资分布
+  const buckets = data.salary_buckets || {};
+  const ck = Object.keys(buckets).sort((a,b) => {
+    const na = parseInt(a.split('-')[0] || a);
+    const nb = parseInt(b.split('-')[0] || b);
+    return na - nb;
+  });
+  const chartEl = document.getElementById('salaryChart');
+  if (ck.length === 0) { chartEl.innerHTML = '<div class="no-data">暂无数据</div>'; }
+  else {
+    const maxV = Math.max(...ck.map(k => buckets[k]));
+    chartEl.innerHTML = ck.map(k => {
+      const h = Math.round((buckets[k] / maxV) * 100);
+      return `<div style="display:flex;align-items:center;margin-bottom:3px;gap:6px;font-size:11px">
+        <span style="width:40px;text-align:right;color:var(--dim)">${esc(k)}</span>
+        <div style="flex:1;height:12px;background:var(--border);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${h}%;background:var(--accent);border-radius:3px"></div>
+        </div>
+        <span style="width:20px;color:var(--dim)">${buckets[k]}</span>
+      </div>`;
+    }).join('');
+  }
+
+  const locs = data.location_stats || {};
+  const le = Object.entries(locs).sort((a,b) => b[1] - a[1]);
+  const locEl = document.getElementById('locList');
+  if (le.length === 0) { locEl.innerHTML = '<div class="no-data">暂无数据</div>'; }
+  else {
+    const mx = le[0][1];
+    locEl.innerHTML = le.map(([name, count]) => {
+      const bw = Math.round((count / mx) * 100);
+      return `<div class="loc-item"><span>${esc(name)}</span><span>${count}</span></div>
+        <div style="height:3px;background:var(--accent);border-radius:2px;width:${bw}%"></div>`;
+    }).join('');
+  }
+}
+
+// === 判定来源标签 ===
+async function updateJudgeSource() {
+  const data = await api('api/judgment-files');
+  const el = document.getElementById('judgeSource');
+  if (!el) return;
+  if (data && data.current) {
+    el.textContent = '当前: ' + data.current;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = '未导入判定结果';
+    el.style.color = 'var(--dim)';
+  }
+}
+
+// === 打招呼语管理 ===
+async function updateGreetingSource() {
+  var d = await api('api/greeting-files');
+  var el = document.getElementById('greetingSource');
+  if (!el) return;
+  if (d && d.current) {
+    el.textContent = '当前: ' + d.current;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = '未配置打招呼语';
+    el.style.color = 'var(--dim)';
+  }
+}
+
+var greetingPreviewCache = '';
+async function showGreetingPreview(e) {
+  if (!greetingPreviewCache) {
+    var d = await api('api/greeting-content');
+    greetingPreviewCache = d ? (d.content || '') : '';
+  }
+  var pv = document.getElementById('greetingPreview');
+  pv.textContent = greetingPreviewCache;
+  pv.style.display = 'block';
+  pv.style.left = (e.clientX + 12) + 'px';
+  pv.style.top = Math.min(e.clientY, window.innerHeight - 320) + 'px';
+}
+function hideGreetingPreview() {
+  document.getElementById('greetingPreview').style.display = 'none';
+}
+
+async function openGreetingFile() {
+  var d = await api('api/greeting-files');
+  var name = d ? (d.current || 'default.md') : 'default.md';
+  await fetch('api/greeting-open?file=' + encodeURIComponent(name) + '&t=' + Date.now());
+  showToast('📝 已在 Finder 中打开: ' + name, 2000);
+}
+
+// === 导入判定结果 ===
+let importSelected = null;
+async function showImportModal() {
+  const d = await api('api/judgment-files');
+  const listEl = document.getElementById('importFileList');
+  if (!d || !d.files || d.files.length === 0) {
+    listEl.innerHTML = '⚠️ 02_result/ 目录下没有找到判定结果 CSV';
+    document.getElementById('importModal').style.display = 'flex';
+    return;
+  }
+  listEl.innerHTML = d.files.map(f => {
+    const checked = (f === d.current) ? 'checked' : '';
+    const isCur = (f === d.current) ? ' <span style="color:var(--green)">（当前生效）</span>' : '';
+    return '<label style="display:block;padding:7px 0;cursor:pointer;border-bottom:1px solid var(--border)">' +
+      '<input type="radio" name="importCsv" value="' + esc(f) + '" ' + checked + ' onchange="importSelected=\'' + esc(f) + '\'"> ' +
+      '<span style="font-size:12px">' + esc(f) + '</span>' + isCur +
+    '</label>';
+  }).join('');
+  importSelected = d.current || d.files[0];
+  document.getElementById('importModal').style.display = 'flex';
+}
+function closeImportModal() {
+  document.getElementById('importModal').style.display = 'none';
+}
+async function confirmImport() {
+  const sel = document.querySelector('input[name=importCsv]:checked');
+  if (!sel) { showToast('请选择要导入的 CSV', true); return; }
+  const res = await api('api/import-judgment', 'POST', { csv: sel.value });
+  if (res && res.ok) {
+    closeImportModal();
+    showToast('✅ 已导入: ' + sel.value + '（已持久化，下次打开自动引用）', 4000);
+    updateJudgeSource();
+    updateGreetingSource();
+    pollJobs();
+  } else {
+    showToast('⚠️ 导入失败: ' + (res && res.error ? res.error : '未知'), true);
+  }
+}
+
+function updatePriorityStats() {
+  let h=0, m=0, l=0;
+  for (const job of (allJobs || [])) {
+    const lv = job['judgment_level'];
+    if (lv === '高') h++;
+    else if (lv === '中') m++;
+    else if (lv === '低') l++;
+  }
+  document.getElementById('priHigh').textContent = h;
+  document.getElementById('priMid').textContent = m;
+  document.getElementById('priLow').textContent = l;
+}
+
+// === T5: 一键判定 ===
+async function invokeAgent() {
+  // 优先使用后端完整提示词（含字段硬约束，避免合并出错）；失败则回退旧版简略提示词
+  const res = await api('api/judgment-prompt');
+  if (res && res.ok && res.prompt) {
+    const prompt = res.prompt;
+    const usedTemplate = res.template || 'builtin';
+    try {
+      await navigator.clipboard.writeText(prompt);
+      showToast('✅ 完整提示词已复制（模板: ' + usedTemplate + '），粘贴到 OpenClaw 即可', 4000);
+    } catch(e) {
+      prompt('复制以下提示词:', prompt);
+    }
+    return;
+  }
+  const filesData = await api('files');
+  if (!filesData || !filesData.files || filesData.files.length === 0) {
+    showToast('⚠️ 当前 session 无爬取数据', 3000);
+    return;
+  }
+  const rawCsv = filesData.dir + '/' + filesData.files[0].name;
+  const resultDir = filesData.dir.replace('/01_raw', '/02_result');
+  const prompt = '请执行 job-match-priority 优先级判定任务：\n\n' +
+    '数据文件：' + rawCsv + '\n' +
+    '输出目录：' + resultDir + '\n' +
+    '候选人画像：last\n\n' +
+    '请按照 job-match-priority Skill 的流程执行判定，将结果写入输出目录。';
+  try {
+    await navigator.clipboard.writeText(prompt);
+    showToast('✅ 提示词已复制！粘贴到 OpenClaw 即可', 3000);
+  } catch(e) {
+    prompt('复制以下提示词:', prompt);
+  }
+}
+
+// === T3: 爬取模态窗口 ===
+function showCrawlModal(redo) {
+  document.getElementById('crawlModal').style.display = 'flex';
+  document.getElementById('loginWait').style.display = 'none';
+  document.getElementById('crawlActions').style.display = 'flex';
+  const urlInput = document.getElementById('crawlUrl');
+  const nameInput = document.getElementById('crawlSessionName');
+  const modal = document.getElementById('crawlModal');
+  const titleEl = modal.querySelector('h3');
+  if (redo) {
+    // 重新爬取：列表页与任务名固定，参数可改
+    const fixedUrl = sessionSearchUrls[currentSession] || '';
+    modal.dataset.redo = '1';
+    urlInput.readOnly = true;
+    urlInput.style.background = 'var(--bg)';
+    urlInput.style.cursor = 'not-allowed';
+    nameInput.readOnly = true;
+    nameInput.style.background = 'var(--bg)';
+    nameInput.style.cursor = 'not-allowed';
+    nameInput.value = currentSession || '';
+    if (fixedUrl) {
+      urlInput.value = fixedUrl;
+    } else {
+      urlInput.value = '';
+      urlInput.placeholder = '⚠️ 未记录列表页链接，请手动粘贴';
+    }
+    if (titleEl) titleEl.textContent = '🕷️ 重新爬取（页面与任务名已锁定，参数可调整）';
+  } else {
+    // 新建任务：恢复正常编辑
+    modal.dataset.redo = '';
+    urlInput.readOnly = false;
+    urlInput.style.background = '';
+    urlInput.style.cursor = '';
+    nameInput.readOnly = false;
+    nameInput.style.background = '';
+    nameInput.style.cursor = '';
+    if (titleEl) titleEl.textContent = '🕷️ 开始爬取';
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0,10);
+    nameInput.value = dateStr + '-';
+    nameInput.placeholder = dateStr + '-搜索词';
+  }
+}
+
+function closeCrawlModal() {
+  document.getElementById('crawlModal').style.display = 'none';
+  const modal = document.getElementById('crawlModal');
+  modal.dataset.redo = '';
+  const urlInput = document.getElementById('crawlUrl');
+  const nameInput = document.getElementById('crawlSessionName');
+  urlInput.readOnly = false; urlInput.style.background = ''; urlInput.style.cursor = '';
+  nameInput.readOnly = false; nameInput.style.background = ''; nameInput.style.cursor = '';
+  if (crawlCountdown) { clearInterval(crawlCountdown); crawlCountdown = null; }
+  if (loginCheckInterval) { clearInterval(loginCheckInterval); loginCheckInterval = null; }
+  pendingCrawlParams = null;
+}
+
+async function startCrawl() {
+  let url = document.getElementById('crawlUrl').value.trim();
+  let usedActive = false;
+  // 未填 URL 时，尝试使用浏览器中已打开的列表页
+  if (!url) {
+    try {
+      const active = await api('api/browser/active-list');
+      if (active && active.found) {
+        url = active.url;
+        document.getElementById('crawlUrl').value = url;
+        usedActive = true;
+      }
+    } catch(e) {}
+  }
+  if (!url || !url.includes('zhipin.com')) {
+    alert('请先在「列表页 URL」输入链接，或在浏览器中打开 Boss 列表页后留空由系统自动识别');
+    return;
+  }
+
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0,10);
+  const timeStr = now.toTimeString().slice(0,8).replace(/:/g,'');
+  const queryMatch = url.match(/query=([^&]+)/);
+  const query = queryMatch ? decodeURIComponent(queryMatch[1]).replace(/\s+/g, '') : '未知';
+  const sessionName = document.getElementById('crawlSessionName').value.trim() || (dateStr + '-' + query + '-' + timeStr);
+
+  pendingCrawlParams = {
+    url: url,
+    max_scroll: parseInt(document.getElementById('crawlMaxScroll').value) || 50,
+    max_jobs: parseInt(document.getElementById('crawlMaxJobs').value) || 300,
+    base_wait: parseInt(document.getElementById('crawlBaseWait').value) || 20,
+    scroll_wait: parseFloat(document.getElementById('crawlScrollWait').value) || 5,
+    scroll_delta: (document.getElementById('crawlScrollDeltaMin').value||'1.5')+'-'+(document.getElementById('crawlScrollDeltaMax').value||'2.5'),
+    job_gap: (document.getElementById('crawlJobGapMin').value||'1.0')+'-'+(document.getElementById('crawlJobGapMax').value||'3.0'),
+    detail_jitter: parseFloat(document.getElementById('crawlDetailJitter').value) || 3,
+    session_name: sessionName,
+    output_dir: '',
+    keep_session: document.getElementById('crawlModal').dataset.redo === '1'
+  };
+
+  // 隐藏表单，显示登录检查
+  document.getElementById('crawlActions').style.display = 'none';
+  document.getElementById('loginWait').style.display = 'block';
+  const btnLogin = document.getElementById('btnLoginDone');
+  btnLogin.disabled = true;
+  btnLogin.style.background = 'var(--dim)';
+  btnLogin.style.opacity = '0.5';
+  btnLogin.style.cursor = 'not-allowed';
+
+  document.getElementById('loginStatus').textContent = '🔄 检查浏览器状态...';
+  document.getElementById('loginStatus').style.color = 'var(--dim)';
+
+  // 步骤1: 检查并启动 CloakBrowser
+  const browserStatus = await api('api/browser/status');
+  if (!browserStatus || !browserStatus.running) {
+    document.getElementById('loginStatus').textContent = '🚀 正在自动启动 CloakBrowser...';
+    document.getElementById('loginStatus').style.color = 'var(--orange)';
+    const startRes = await api('api/browser/start', 'POST', {});
+    if (startRes && startRes.ok) {
+      document.getElementById('loginStatus').textContent = '✅ CloakBrowser 已启动，正在打开列表页...';
+      document.getElementById('loginStatus').style.color = 'var(--green)';
+    } else {
+      if (startRes && startRes.action === 'quit_browser') {
+        document.getElementById('loginStatus').textContent = '⚠️ CloakBrowser 已在运行但未开启调试端口，请 ⌘Q 退出浏览器后重试';
+        document.getElementById('loginStatus').style.color = 'var(--red)';
+        document.getElementById('crawlActions').style.display = 'flex';
+        return;
+      }
+      const diag = startRes?.diagnostic || (browserStatus?.diagnostic || '无详细信息');
+      document.getElementById('loginStatus').textContent = '⚠️ 自动启动失败，诊断: ' + diag;
+      document.getElementById('loginStatus').style.color = 'var(--orange)';
+    }
+  } else {
+    document.getElementById('loginStatus').textContent = '✅ 浏览器已就绪，正在打开列表页...';
+    document.getElementById('loginStatus').style.color = 'var(--green)';
+  }
+
+  // 步骤2: 打开/确认列表页
+  if (usedActive) {
+    document.getElementById('loginStatus').textContent = '📋 已识别当前打开的列表页，请在浏览器中确认登录';
+    document.getElementById('loginStatus').style.color = 'var(--yellow)';
+  } else {
+    const navRes = await api('api/browser/navigate', 'POST', { url: pendingCrawlParams.url });
+    if (navRes && navRes.ok) {
+      document.getElementById('loginStatus').textContent = '📋 已打开列表页，请在浏览器中扫码登录';
+      document.getElementById('loginStatus').style.color = 'var(--yellow)';
+    } else {
+      const err = (navRes && navRes.error) ? ('：' + navRes.error) : '';
+      document.getElementById('loginStatus').textContent = '⚠️ 列表页导航失败（将自动重试），请先扫码登录' + err;
+      document.getElementById('loginStatus').style.color = 'var(--orange)';
+    }
+  }
+
+  // 步骤3: 等页面加载后，检查一次登录状态（不再 60 秒倒计时轮询）
+  await new Promise(r => setTimeout(r, 2000));
+  const loginCheck = await api('api/check-login');
+  if (loginCheck && loginCheck.logged_in) {
+    // 已登录：直接自动开始爬取
+    document.getElementById('loginStatus').textContent = '✅ 已检测到登录，自动开始爬取...';
+    document.getElementById('loginStatus').style.color = 'var(--green)';
+    await new Promise(r => setTimeout(r, 1200));
+    doStartCrawl(pendingCrawlParams);
+  } else {
+    // 未登录：提示回到 Boss 主页登录，检查一次即可
+    let reason = loginCheck ? (loginCheck.reason || '未检测到登录') : '未检测到登录';
+    document.getElementById('loginStatus').textContent = '⚠️ ' + reason + '。请回到 Boss 主页扫码登录，再点「已登录，重新检查」';
+    document.getElementById('loginStatus').style.color = 'var(--orange)';
+    btnLogin.disabled = false;
+    btnLogin.style.background = 'var(--green)';
+    btnLogin.style.opacity = '1';
+    btnLogin.style.cursor = 'pointer';
+  }
+}
+
+function skipWait() {
+  if (crawlCountdown) { clearInterval(crawlCountdown); crawlCountdown = null; }
+  if (loginCheckInterval) { clearInterval(loginCheckInterval); loginCheckInterval = null; }
+  if (!pendingCrawlParams) {
+    pendingCrawlParams = {
+      url: document.getElementById('crawlUrl').value.trim(),
+      max_scroll: parseInt(document.getElementById('crawlMaxScroll').value) || 50,
+      max_jobs: parseInt(document.getElementById('crawlMaxJobs').value) || 0,
+      base_wait: parseInt(document.getElementById('crawlBaseWait').value) || 20,
+      session_name: document.getElementById('crawlSessionName').value.trim() || 'manual',
+      keep_session: document.getElementById('crawlModal').dataset.redo === '1',
+    };
+  }
+  doStartCrawl(pendingCrawlParams);
+}
+
+async function confirmLoggedIn() {
+  // 重新检查一次登录状态：已登录 → 开始爬取；未登录 → 继续提示回主页登录
+  if (!pendingCrawlParams) return;
+  const btnLogin = document.getElementById('btnLoginDone');
+  btnLogin.disabled = true;
+  btnLogin.style.opacity = '0.5';
+  document.getElementById('loginStatus').textContent = '🔄 正在检查登录状态...';
+  document.getElementById('loginStatus').style.color = 'var(--accent)';
+  const check = await api('api/check-login');
+  if (check && check.logged_in) {
+    document.getElementById('loginStatus').textContent = '✅ 已登录，开始爬取...';
+    document.getElementById('loginStatus').style.color = 'var(--green)';
+    await new Promise(r => setTimeout(r, 1200));
+    doStartCrawl(pendingCrawlParams);
+  } else {
+    document.getElementById('loginStatus').textContent = '⚠️ 仍未检测到登录，请回到 Boss 主页完成登录后重试';
+    document.getElementById('loginStatus').style.color = 'var(--orange)';
+    btnLogin.disabled = false;
+    btnLogin.style.opacity = '1';
+  }
+}
+
+// 回到 Boss 主页（方便重新登录）
+async function goBossHome() {
+  showToast('🏠 正在打开 Boss 主页...', 2000);
+  await api('api/browser/navigate', 'POST', { url: 'https://www.zhipin.com/' });
+  document.getElementById('loginStatus').textContent = '📋 已打开 Boss 主页，请在浏览器中登录后点「已登录，重新检查」';
+  document.getElementById('loginStatus').style.color = 'var(--yellow)';
+}
+
+async function doStartCrawl(params) {
+  closeCrawlModal();
+  const result = await api('api/crawl/start', 'POST', params);
+  if (result && result.ok) {
+    document.getElementById('statusText').textContent = '🕷️ 爬取已启动';
+    document.getElementById('btnStartCrawl').style.display = 'none';
+    document.getElementById('btnStopCrawl').style.display = '';
+    // 使用后端返回的实际 session 名（同名任务会被自动避让为 xxx-2）
+    const actualSession = (result && result.session_name) || params.session_name;
+    currentSession = actualSession;
+    if (result && result.renamed) {
+      showToast('⚠️ 已存在同名任务，自动使用新目录: ' + actualSession, 6000);
+    }
+    await loadSessions();
+    // 强制选中新 session
+    var sel = document.getElementById('sessionSelect');
+    if (Array.from(sel.options).find(function(o) { return o.value === actualSession; })) {
+      sel.value = actualSession;
+      currentSession = actualSession;
+      jobDescriptions = {};
+      pollProgress();
+      pollJobs();
+      updateJudgeSource();
+    updateGreetingSource();
+    }
+  } else {
+    alert(result?.error || '启动失败');
+  }
+}
+
+async function stopCrawl() {
+  if (!confirm('确认停止当前爬取？')) return;
+  const result = await api('api/crawl/stop', 'POST');
+  if (result && result.ok) {
+    document.getElementById('statusText').textContent = '⏹ 已停止';
+    document.getElementById('btnStartCrawl').style.display = '';
+    document.getElementById('btnStopCrawl').style.display = 'none';
+  }
+}
+
+// === T7: 打招呼 ===
+async function showGreetModal() {
+  const data = await api('priority');
+  if (!data || !data.priorities) {
+    showToast('⚠️ 无优先级数据', 3000);
+    return;
+  }
+  const pris = data.priorities || {};
+  let highCount = 0, midCount = 0;
+  for (const v of Object.values(pris)) {
+    if (v === '高') highCount++;
+    else if (v === '中') midCount++;
+  }
+  const total = highCount + midCount;
+  if (total === 0) {
+    showToast('⚠️ 无高/中级岗位可打招呼', 3000);
+    return;
+  }
+  document.getElementById('greetInfo').innerHTML =
+    '共 <b>' + total + '</b> 条高/中级岗位（<span style="color:var(--p-high)">高 ' + highCount + '</span> / <span style="color:var(--p-mid)">中 ' + midCount + '</span>）<br><br>确认后将自动执行打招呼脚本。';
+  document.getElementById('greetModal').style.display = 'flex';
+}
+
+function closeGreetModal() {
+  document.getElementById('greetModal').style.display = 'none';
+}
+
+async function confirmGreet() {
+  closeGreetModal();
+  // 确保 CDP 浏览器在线
+  showToast('🚀 检查 CDP 浏览器...', 2000);
+  var ok = await ensureBrowserReady();
+  if (!ok) { showToast('⚠️ CDP 浏览器启动失败，无法打招呼', 4000); return; }
+  showToast('💬 启动打招呼...', 2000);
+  const firstOne = document.getElementById('greetFirstOne') ? document.getElementById('greetFirstOne').checked : false;
+  const result = await api('api/greet/start', 'POST', { first_one: firstOne });
+  if (result && result.ok) {
+    showToast('✅ 打招呼已启动（共 ' + (result.total || 0) + ' 条）', 3000);
+    document.getElementById('btnGreet').disabled = true;
+    document.getElementById('greetProgress').style.display = 'block';
+    pollGreetStatus();
+  } else {
+    alert(result?.error || '启动打招呼失败');
+  }
+}
+
+let greetToastArmed = false;  // 仅当打招呼进程实际运行过并结束时才弹「完成」提示
+async function pollGreetStatus() {
+  const data = await api('api/greet/status');
+  if (!data) return;
+  greetByJob = data.byJob || {};
+  const el = document.getElementById('greetProgress');
+  if (el) {
+    const parts = [];
+    parts.push('成功 ' + (data.done || 0));
+    parts.push('失败 ' + (data.failed || 0));
+    if (data.skipped) parts.push('跳过 ' + data.skipped);
+    parts.push('共 ' + (data.total || 0));
+    el.innerHTML = '进度: ' + parts.join(' / ');
+  }
+  if (data.running) {
+    greetToastArmed = true;  // 有进程在跑，结束后可弹完成提示
+    setTimeout(pollGreetStatus, 3000);
+  } else {
+    document.getElementById('btnGreet').disabled = false;
+    // 修复：切换 session / 页面加载也会轮询到此，只有「刚跑完打招呼」才弹窗
+    if (data.done > 0 && greetToastArmed) {
+      showToast('✅ 打招呼完成！' + data.done + ' 条成功', 5000);
+      greetToastArmed = false;
+    }
+  }
+  // 刷新列表徽标
+  if (allJobs && allJobs.length) renderJobList();
+}
+
+// === 详情页手动改优先级（同步 CSV） ===
+async function setPriorityInline(jobId, level) {
+  const data = await api('priority', 'POST', { job_id: jobId, level });
+  if (data && data.priorities) {
+    await pollJobs();
+    const idx = currentJobs.findIndex(j => j.job_id === jobId);
+    if (idx >= 0) {
+      selectedJobId = jobId;
+      selectJob(jobId, idx);
+    }
+    showToast('✅ 优先级已更新（已同步至判定 CSV）', 2500);
+  } else {
+    showToast('⚠️ 优先级更新失败', 2500);
+  }
+}
+
+// === 消息按钮 ===
+async function openBossMessage() {
+  const data = await api('navigate', 'POST', { url: 'https://www.zhipin.com/web/geek/chat?ka=header-message' });
+  if (data && data.ok) {
+    document.getElementById('statusText').textContent = '✅ 已跳转到消息页';
+    setTimeout(function() { document.getElementById('statusText').textContent = '就绪'; }, 2000);
+  }
+}
+
+// === 跳过滚动 ===
+async function skipScroll() {
+  if (!confirm('将跳过剩余滚动，直接开始爬取详情页。确认？')) return;
+  var browserReady = await ensureBrowserReady();
+  if (!browserReady) {
+    showToast('⚠️ CDP 浏览器未就绪', 3000);
+    return;
+  }
+  var searchUrl = sessionSearchUrls[currentSession] || '';
+  const data = await api('api/crawl/skip-scroll', 'POST', {
+    output_dir: currentDir,
+    url: searchUrl,
+    navigate: false,
+    max_scroll: 0,
+    max_jobs: 300,
+    base_wait: 20,
+    scroll_wait: 5,
+    scroll_delta: '1.5-2.5',
+    job_gap: '1.0-3.0',
+    detail_jitter: 3,
+    session_name: currentSession
+  });
+  if (data && data.ok) {
+    showToast('⏩ 已跳过滚动，直接进入详情爬取', 2500);
+  } else {
+    showToast('⚠️ 操作失败: ' + (data && data.error ? data.error : '未知错误'), 3000);
+  }
+}
+
+// === CDP 浏览器就绪检测 ===
+async function ensureBrowserReady() {
+  var bs = await api('api/browser/status');
+  if (bs && bs.running) return true;
+  showToast('🚀 正在启动 CloakBrowser...', 3000);
+  var sr = await api('api/browser/start', 'POST', {});
+  if (sr && sr.ok) {
+    showToast('✅ 浏览器已启动', 2000);
+    var waited = 0;
+    while (waited < 15) {
+      await new Promise(function(r) { setTimeout(r, 1000); });
+      var st = await api('api/browser/status');
+      if (st && st.running) return true;
+      waited++;
+    }
+  }
+  return false;
+}
+
+// === 断点续爬 ===
+async function resumeCrawl() {
+  // 重新爬取（无数据任务）→ 打开新建爬取窗口：URL/名称锁定，参数可改
+  var mode = (document.getElementById('btnResumeCrawl').dataset.mode) || 'resume';
+  if (mode === 'redo') { showCrawlModal(true); return; }
+  // 读取真实 CSV 数据量
+  var csvCount = 0;
+  try { var jd = await api('jobs_cache.json'); csvCount = jd ? jd.length : 0; } catch(e) {}
+  var prog = await api('progress.json');
+  var done = prog ? (prog.scraped || 0) : 0;
+  var total = prog ? (prog.list_total || 0) : 0;
+  var st = prog ? (prog.status || 'unknown') : 'unknown';
+  var then = prog ? ((prog.updated_at||'').replace('T',' ').slice(0,19)) : '未知';
+  if (csvCount > 0 && done === 0) done = csvCount;
+
+  var searchUrl = sessionSearchUrls[currentSession] || '';
+  if (!searchUrl) { showToast('⚠️ 无列表页 URL，请通过「开始爬取」新建', 3000); return; }
+
+  var msg = 'Session: ' + currentSession + '\n状态: ' + st + ' | 更新: ' + then;
+  msg += '\n已爬取: ' + done + '/' + (total||'?') + ' 条';
+  msg += '\n\n流程: ①启动浏览器 ②打开列表页 ③滚动加载 ④跳过' + done + '条已爬→续爬';
+  if (!confirm(msg)) return;
+
+  showToast('🚀 启动浏览器+打开列表页...', 4000);
+
+  // 步骤1: 浏览器就绪
+  var ok = await ensureBrowserReady();
+  if (!ok) { showToast('⚠️ 浏览器启动失败', 3000); return; }
+
+  // 步骤2: 导航到列表页（复现新建爬取的步骤）
+  var nav = await api('api/browser/navigate', 'POST', { url: searchUrl });
+  await new Promise(function(r){setTimeout(r,2500);});
+
+  // 步骤2.5: 检查一次登录状态（未登录则提示回主页，中止本次续爬）
+  var lg = await api('api/check-login');
+  if (!(lg && lg.logged_in)) {
+    showToast('⚠️ 未检测到登录，请回到 Boss 主页重新登录后再继续', 5000);
+    await api('api/browser/navigate', 'POST', { url: 'https://www.zhipin.com/' });
+    return;
+  }
+
+  // 步骤3: 启动爬虫
+  showToast('🕷️ 启动爬虫，跳过' + done + '条去重...', 3000);
+  // 续爬：不传 max_scroll，由后端从 crawl_params.json 恢复上次的滚动/条数等参数，
+  // 爬虫按 job_id 跨文件去重跳过已爬（修复「续爬不增加数据」）
+  var data = await api('api/crawl/start', 'POST', {
+    url: searchUrl, output_dir: currentDir,
+    max_jobs: 300,
+    resume: true, session_name: currentSession, history_root: ''
+  });
+
+  if (data && data.ok) {
+    showToast('✅ 续爬已启动！跳过' + done + '条，爬取剩余', 4000);
+    document.getElementById('btnStartCrawl').style.display = 'none';
+    document.getElementById('btnStopCrawl').style.display = 'inline-flex';
+    document.getElementById('btnResumeCrawl').style.display = 'none';
+    currentSession = currentSession; pollProgress(); pollJobs();
+  } else {
+    showToast('⚠️ 失败: ' + (data&&data.error?data.error:'未知'), 4000);
+  }
+}
+
+// === 沟通跳转 ===
+async function openJobPage(jobUrl) {
+  if (!jobUrl) { alert('无岗位链接'); return; }
+  const data = await api('navigate', 'POST', { url: jobUrl });
+  if (data && data.ok) {
+    document.getElementById('statusText').textContent = '✅ 已跳转';
+    setTimeout(() => { document.getElementById('statusText').textContent = '就绪'; }, 2000);
+  } else {
+    alert(data?.error || '跳转失败');
+  }
+}
+
+// === Finder 打开 ===
+async function openFolder() {
+  const data = await api('open-folder', 'GET');
+  if (data && data.ok) {
+    document.getElementById('statusText').textContent = '📂 Finder 已打开';
+    setTimeout(() => { document.getElementById('statusText').textContent = '就绪'; }, 2000);
+  } else {
+    alert(data?.error || '打开失败');
+  }
+}
+
+// === 复制搜索链接 ===
+function copySearchUrl() {
+  const url = sessionSearchUrls[currentSession] || '';
+  if (!url) { alert('当前 session 无搜索链接'); return; }
+  navigator.clipboard.writeText(url).then(() => {
+    showToast('✅ 链接已复制', 2000);
+  }).catch(() => {
+    prompt('复制以下链接:', url);
+  });
+}
+
+// === 筛选 ===
+let salaryFilterEnabled = false;
+function enableSalaryFilter() {
+  if (salaryFilterEnabled) return;
+  salaryFilterEnabled = true;
+  const minEl = document.getElementById('filterSalaryMin');
+  const maxEl = document.getElementById('filterSalaryMax');
+  if (!minEl.value && minEl.placeholder) minEl.value = minEl.placeholder;
+  if (!maxEl.value && maxEl.placeholder) maxEl.value = maxEl.placeholder;
+  applyFilters();
+}
+
+function applyFilters() {
+  const region = document.getElementById('filterRegion').value.trim().toLowerCase();
+  const minK = parseFloat(document.getElementById('filterSalaryMin').value) || 0;
+  const maxK = parseFloat(document.getElementById('filterSalaryMax').value) || Infinity;
+
+  currentJobs = allJobs.filter(job => {
+    if (region) {
+      const loc = (job['区域'] || job['城市'] || '').toLowerCase();
+      if (!loc.includes(region)) return false;
+    }
+    const prio = document.getElementById('filterPriority').value;
+    if (prio) {
+      if (prio === 'none') {
+        if (job['judgment_level']) return false;
+      } else if (job['judgment_level'] !== prio) {
+        return false;
+      }
+    }
+    if (salaryFilterEnabled && (minK > 0 || maxK < Infinity)) {
+      const salary = job['薪资'] || '';
+      const m = salary.match(/(\d+)-(\d+)K/);
+      if (m) {
+        const lo = parseInt(m[1]), hi = parseInt(m[2]);
+        const mid = (lo + hi) / 2;
+        if (mid < minK || mid > maxK) return false;
+      } else if (minK > 0) {
+        return false;
+      }
+    }
+    return true;
+  });
+  renderJobList();
+  document.getElementById('jobCountDisplay').textContent =
+    currentJobs.length === allJobs.length ? allJobs.length + ' 条' :
+    currentJobs.length + ' / ' + allJobs.length + ' 条';
+}
+
+// === 岗位列表 ===
+function renderJobList() {
+  const el = document.getElementById('jobList');
+  if (!currentJobs || currentJobs.length === 0) {
+    el.innerHTML = '<div class="no-data">暂无岗位</div>';
+    return;
+  }
+  el.innerHTML = currentJobs.map((job, idx) => {
+    const active = job.job_id === selectedJobId ? ' active' : '';
+    const jLvl = job['judgment_level'] || '';
+    const pClass = jLvl ? ' p-' + ({高:'high',中:'mid',低:'low'}[jLvl]) : '';
+    const g = greetByJob[job.job_id];
+    let badge = '<span class="badge ok">✓</span>';
+    if (g) {
+      if (g.result === '成功') badge = '<span class="badge greet-ok" title="已打招呼">💬✓</span>';
+      else if (g.result === '跳过') badge = '<span class="badge greet-skip" title="已跳过：' + esc(g.error || '岗位关闭或无沟通按钮') + '">⏭</span>';
+      else badge = '<span class="badge greet-fail" title="打招呼失败：' + esc(g.error || '未知原因') + '">💬✗</span>';
+    } else {
+      badge = '<span class="badge ok">✓</span>';
+    }
+    const priTag = jLvl
+      ? '<span class="pri-tag ' + ({高:'high',中:'mid',低:'low'}[jLvl]) + '">' + jLvl + '</span>'
+      : '<span class="pri-tag none">-</span>';
+
+    return '<div class="job-item' + active + pClass + '" onclick="selectJob(\'' + job.job_id + '\', ' + idx + ')">' +
+      '<div class="job-title-row">' +
+        badge + '<span class="job-item-title">' + esc(job['职位名称'] || '未知') + '</span>' +
+        priTag +
+        greetDetailTag(job) +
+      '</div>' +
+      '<div class="job-item-company">' + esc(job['公司名称'] || '') + '</div>' +
+      '<div class="job-item-meta">' +
+        '<span>' + esc(job['薪资'] || '面议') + '</span>' +
+        '<span>' + esc(job['区域'] || job['城市'] || '') + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// === 选中详情 ===
+async function selectJob(jobId, idx) {
+  selectedJobId = jobId;
+  document.querySelectorAll('.job-item').forEach((el, i) => el.classList.toggle('active', i === idx));
+
+  const detailEl = document.getElementById('jobDetail');
+  const job = currentJobs[idx];
+  if (!job) return;
+
+  const jLvl = job['judgment_level'] || '';
+  const priTag = jLvl
+    ? '<span class="pri-tag ' + ({高:'high',中:'mid',低:'low'}[jLvl]) + '">优先级: ' + jLvl + '</span>'
+    : '<span class="pri-tag none">优先级: -</span>';
+
+  detailEl.innerHTML =
+    '<div class="detail-header">' +
+      '<h2>' + esc(job['职位名称'] || '') + '</h2>' +
+      '<div class="detail-meta">' +
+        '<span>💰 ' + esc(job['薪资'] || '面议') + '</span>' +
+        '<span>🏢 ' + esc(job['公司名称'] || '') + '</span>' +
+        '<span>📍 ' + esc(job['区域'] || job['城市'] || '') + '</span>' +
+        priTag +
+        (job.job_url ? '<a class="detail-link" href="#" onclick="openJobPage(\'' + esc(job.job_url || '') + '\');return false;">↗ 打开原页</a>' : '') +
+      '</div>' +
+    '</div>' +
+    judgmentCardHtml(job) +
+    '<div class="detail-desc" id="descContent" style="margin-top:16px">加载职位描述中...</div>';
+
+  if (jobDescriptions[jobId]) {
+    document.getElementById('descContent').textContent = jobDescriptions[jobId];
+    return;
+  }
+  try {
+    const sp = sessionParam();
+    const url = 'detail?job_id=' + jobId + (sp ? '&' + sp.slice(1) : '');
+    const resp = await fetch(url + (sp ? '&' : '?') + 't=' + Date.now());
+    const data = await resp.json();
+    const desc = data['职位描述'] || '暂无描述';
+    jobDescriptions[jobId] = desc;
+    document.getElementById('descContent').textContent = desc;
+  } catch(e) {
+    document.getElementById('descContent').textContent = '加载失败: ' + e.message;
+  }
+}
+
+// 详情页打招呼状态标签
+function greetDetailTag(job) {
+  const g = greetByJob[job.job_id];
+  if (!g) return '';
+  if (g.result === '成功') return '<span class="pri-tag greet-tag-ok">💬 已打招呼</span>';
+  if (g.result === '跳过') return '<span class="pri-tag greet-tag-skip">⏭ 已跳过</span>';
+  return '<span class="pri-tag greet-tag-fail" title="' + esc(g.error || '') + '">💬 失败</span>';
+}
+
+// 判定信息卡片（匹配度直接显示；判断理由悬停 tooltip；长文本截断）
+function judgmentCardHtml(job) {
+  const lvl = job['judgment_level'] || '';
+  if (!lvl) {
+    return '<div class="judge-card none">尚未进行优先级判定</div>';
+  }
+  const match = job['judgment_match'] || '-';
+  const reason = job['judgment_reason'] || '无';
+  const scores = job['judgment_scores'] || '';
+  const signals = job['judgment_signals'] || '';
+  const jdDepth = job['judgment_jd_depth'] || '-';
+  const candDepth = job['judgment_candidate_depth'] || '-';
+  const lvlColor = {高:'high',中:'mid',低:'low'}[lvl];
+
+  const manualMark = job['judgment_manual'] ? ' <span title="已手动修改">✏️</span>' : '';
+  const priOptions = ['高','中','低'].map(function(v){
+    return '<option value="'+v+'"'+(lvl===v?' selected':'')+'>'+v+'</option>';
+  }).join('');
+  const priSelect = `<select class="pri-select" onchange="setPriorityInline('${job.job_id}', this.value)">` + priOptions + '</select>' + manualMark;
+
+  let html = '<div class="judge-card">' +
+    '<div class="judge-row">' +
+      '<span class="judge-k">优先级</span>' + priSelect +
+      '<span class="judge-k" style="margin-left:16px">匹配度</span>' +
+      '<span class="judge-v">' + esc(match) + (match && match !== '-' ? '%' : '') + '</span>' +
+    '</div>';
+
+  if (scores) {
+    html += '<div class="judge-row"><span class="judge-k">能力得分</span><span class="judge-v">' + esc(scores) + '</span></div>';
+  }
+  if (signals) {
+    html += '<div class="judge-row"><span class="judge-k">叠加信号</span><span class="judge-v">' + esc(signals) + '</span></div>';
+  }
+  html += '<div class="judge-row">' +
+      '<span class="judge-k">平均JD深度</span><span class="judge-v">' + esc(jdDepth) + '</span>' +
+      '<span class="judge-k" style="margin-left:16px">候选人深度</span><span class="judge-v">' + esc(candDepth) + '</span>' +
+    '</div>';
+
+  // 判断理由：截断显示，鼠标悬停（title）展示完整
+  const shortReason = reason.length > 60 ? reason.slice(0, 60) + '…（悬停查看完整）' : reason;
+  html += '<div class="judge-reason" title="' + esc(reason) + '">📝 判断理由：' + esc(shortReason) + '</div>';
+  html += '</div>';
+  return html;
+}
+
+// === 轮询 ===
+var pollingProgress = false;
+async function pollProgress() {
+  if (pollingProgress) return;
+  pollingProgress = true;
+  try {
+    const data = await api('progress.json');
+    if (data) updateDashboard(data);
+  } finally {
+    pollingProgress = false;
+  }
+}
+
+var pollingJobs = false;
+async function pollJobs() {
+  if (pollingJobs) return;
+  pollingJobs = true;
+  try {
+    const data = await api('jobs_cache.json');
+    if (data) {
+      allJobs = data;
+      applyFilters();
+      updatePriorityStats();
+      if (window.updateFlowGuide) updateFlowGuide();
+      // 填充地区 datalist（仅首次）
+      if (!document.getElementById('regionOptions').children.length && allJobs.length > 0) {
+        const regions = [...new Set(allJobs.map(function(j) { return j['区域'] || j['城市'] || ''; }).filter(Boolean))].sort();
+        document.getElementById('regionOptions').innerHTML = regions.map(function(r) { return '<option value="' + r + '">'; }).join('');
+      }
+      const filesData = await api('files');
+      if (filesData) {
+        currentDir = filesData.dir || '';
+      }
+    }
+  } finally {
+    pollingJobs = false;
+  }
+}
+
+// 爬取状态轮询
+async function pollCrawlStatus() {
+  const data = await api('api/crawl/status');
+  if (data) {
+    if (data.running) {
+      document.getElementById('btnStartCrawl').style.display = 'none';
+      document.getElementById('btnStopCrawl').style.display = '';
+    } else {
+      document.getElementById('btnStartCrawl').style.display = '';
+      document.getElementById('btnStopCrawl').style.display = 'none';
+    }
+  }
+}
+
+// === file:// 检测 ===
+if (window.location.protocol === 'file:') {
+  document.getElementById('statusDot').className = 'status-dot error';
+  document.getElementById('connStatus').textContent = '❌ 请使用 http://localhost:8765';
+  document.getElementById('connStatus').className = 'conn-badge disconnected';
+  document.querySelector('.dashboard').innerHTML = '<div class="stat-card" style="text-align:center;padding:40px"><h2 style="color:var(--red)">❌ 无法连接</h2><p>请通过 HTTP 访问：</p><code style="display:block;background:var(--bg);padding:12px;margin:12px 0;border-radius:6px">http://localhost:8765</code></div>';
+  } else {
+  loadSessions();
+  pollProgress();
+  pollJobs();
+  updateJudgeSource();
+  updateGreetingSource();
+  pollCrawlStatus();
+  pollGreetStatus();
+  refreshEnvStatus();
+  // 保存所有定时器ID，页面关闭时清理
+  var allTimers = [];
+  allTimers.push(setInterval(refreshEnvStatus, 15000));
+  allTimers.push(setInterval(pollProgress, POLL_INTERVAL));
+  allTimers.push(setInterval(pollJobs, JOBS_POLL));
+  allTimers.push(setInterval(updateJudgeSource, 10000));
+  allTimers.push(setInterval(pollCrawlStatus, 5000));
+  pollTasks();
+  allTimers.push(setInterval(pollTasks, 2000));
+}
+
+// === 任务管理器（右下角面板） ===
+let taskPanelOpen = false;
+function toggleTaskPanel() {
+  taskPanelOpen = !taskPanelOpen;
+  document.getElementById('taskPanel').style.display = taskPanelOpen ? 'block' : 'none';
+  if (taskPanelOpen) pollTasks();
+}
+async function pollTasks() {
+  const d = await api('api/tasks');
+  if (!d) return;
+  const tasks = d.tasks || [];
+  // 运行中（含暂停）数量 badge
+  const runningCount = tasks.filter(t => t.status === 'running' || t.status === 'paused').length;
+  const badge = document.getElementById('taskFabBadge');
+  if (runningCount > 0) {
+    badge.textContent = runningCount;
+    badge.style.display = 'flex';
+  } else {
+    badge.style.display = 'none';
+  }
+  renderTaskList(tasks);
+}
+function renderTaskList(tasks) {
+  const el = document.getElementById('taskList');
+  if (!tasks || tasks.length === 0) {
+    el.innerHTML = '<div class="no-data">暂无任务</div>';
+    return;
+  }
+  const kindMeta = { crawl: ['🕷️', '爬取'], greet: ['💬', '打招呼'] };
+  const statusMeta = {
+    running: ['运行中', 'var(--green)'],
+    paused: ['已暂停', 'var(--orange)'],
+    finished: ['已结束', 'var(--dim)'],
+  };
+  el.innerHTML = tasks.map(t => {
+    const km = kindMeta[t.kind] || ['📄', '任务'];
+    const sm = statusMeta[t.status] || ['未知', 'var(--dim)'];
+    const canPause = t.status === 'running';
+    const canResume = t.status === 'paused';
+    const canStop = t.status === 'running' || t.status === 'paused';
+    const canRestart = t.status === 'finished' || t.status === 'paused';
+    return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px">' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<span style="font-size:16px">' + km[0] + '</span>' +
+        '<span style="flex:1;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.label) + '</span>' +
+        '<span style="font-size:11px;color:' + sm[1] + '">' + sm[0] + '</span>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--dim);margin:4px 0 8px">' + km[1] + '任务 · 已运行 ' + fmtTime(t.elapsed) + (t.pid ? ' · PID ' + t.pid : '') + '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+        (canPause ? '<button class="btn-mini" style="font-size:11px" onclick="taskAction(\'' + t.id + '\',\'pause\')">⏸ 暂停</button>' : '') +
+        (canResume ? '<button class="btn-mini" style="font-size:11px;background:var(--green);color:#fff" onclick="taskAction(\'' + t.id + '\',\'resume\')">▶ 继续</button>' : '') +
+        (canStop ? '<button class="btn-mini" style="font-size:11px;background:var(--red);color:#fff" onclick="taskAction(\'' + t.id + '\',\'stop\')">⏹ 停止</button>' : '') +
+        (canRestart ? '<button class="btn-mini" style="font-size:11px" onclick="taskAction(\'' + t.id + '\',\'restart\')">🔄 重启</button>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+async function taskAction(id, action) {
+  const labelMap = { pause: '暂停', resume: '继续', stop: '停止', restart: '重启' };
+  const r = await api('api/task/' + action, 'POST', { task_id: id });
+  if (r && r.ok) {
+    showToast('✅ 已' + (labelMap[action] || action) + '任务', 2000);
+  } else {
+    showToast('⚠️ ' + (r && r.error ? r.error : '操作失败'), 3000);
+  }
+  pollTasks();
+  pollCrawlStatus();
+}
+
+
+// 页面关闭时清理所有定时器
+window.addEventListener('beforeunload', function() {
+  if (allTimers && allTimers.length > 0) {
+    allTimers.forEach(function(timerId) {
+      clearInterval(timerId);
+    });
+    console.log('已清理 ' + allTimers.length + ' 个定时器');
+  }
+});
+</script>
+
+<!-- 新手使用说明 -->
+<div id="useGuide" class="modal" style="display:none">
+  <div class="modal-content" style="max-width:680px;max-height:86vh;overflow-y:auto;text-align:left">
+    <div style="display:flex;align-items:center;margin-bottom:14px">
+      <h2 style="flex:1;font-size:18px;margin:0">📖 新手使用说明</h2>
+      <button class="btn-mini" onclick="toggleUseGuide()">关闭</button>
+    </div>
+
+    <div style="background:var(--bg);border-radius:8px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.8">
+      这是一个帮你<strong>自动完成「找岗位 → 判断合不合适 → 主动打招呼」</strong>的求职工具。
+      全程在网页上点按钮完成，不用写代码。核心就三步：
+      <strong>① 爬取岗位　② AI 判断优先级　③ 自动打招呼</strong>。
+    </div>
+
+    <h3 style="font-size:14px;margin:16px 0 8px">🚀 第一次使用（跟着做，8 步找到工作）</h3>
+    <ol style="font-size:13px;line-height:2;padding-left:20px;margin:0">
+      <li>双击桌面 <strong>「Boss直聘监控.command」</strong>，会弹出这个网页。</li>
+      <li>点顶部 <strong>「🚀 启动浏览器」</strong>，在弹出的浏览器里<strong>扫码登录 Boss 直聘</strong>。</li>
+      <li>去 Boss 网页搜索你想找的岗位，<strong>复制列表页网址</strong>（形如 zhipin.com/web/geek/jobs?...）。</li>
+      <li>回到本页点 <strong>「🕷️ 新建爬取任务」</strong>，粘贴网址，点「确认开始」。系统会自动滚动并抓取所有岗位。</li>
+      <li>等爬取完成（看顶部进度条），岗位会出现在右侧列表。</li>
+      <li>点 <strong>「🤖 一键判定」</strong>，复制提示词，<strong>粘贴给你的 AI 助手</strong>（如 OpenClaw）让它判断岗位优先级。</li>
+      <li>AI 判断完会生成结果文件。点 <strong>「📥 导入判定结果」</strong> 选择该文件，每个岗位就有 高/中/低 标签了。</li>
+      <li>点 <strong>「💬 执行打招呼」</strong>，先勾选「先试第一条」，确认成功后再批量。完成！</li>
+    </ol>
+
+    <h3 style="font-size:14px;margin:20px 0 8px">🧩 各项功能速查</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr style="background:var(--bg)">
+        <th style="padding:6px 8px;text-align:left;border:1px solid var(--border)">按钮 / 区域</th>
+        <th style="padding:6px 8px;text-align:left;border:1px solid var(--border)">干什么用</th>
+      </tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">🚀 启动浏览器</td><td style="padding:6px 8px;border:1px solid var(--border)">打开爬取用的浏览器，登录后自动到推荐页</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">🕷️ 新建爬取任务</td><td style="padding:6px 8px;border:1px solid var(--border)">粘贴列表页网址，抓取所有岗位</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">📋 继续爬取 / 重新爬取</td><td style="padding:6px 8px;border:1px solid var(--border)">中断后接着爬，已爬的自动跳过</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">⏩ 跳过滚动</td><td style="padding:6px 8px;border:1px solid var(--border)">不等滚动完，直接爬当前已显示的岗位</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">🤖 一键判定</td><td style="padding:6px 8px;border:1px solid var(--border)">复制提示词给 AI，判断岗位高/中/低</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">📥 导入判定结果</td><td style="padding:6px 8px;border:1px solid var(--border)">把 AI 的结果文件读进来，岗位显示优先级</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">💬 执行打招呼</td><td style="padding:6px 8px;border:1px solid var(--border)">自动给高/中优先级岗位发打招呼语</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">📊 全局统计</td><td style="padding:6px 8px;border:1px solid var(--border)">看所有历史任务的爬取/判定/分布汇总</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">🛠️ 右下角任务</td><td style="padding:6px 8px;border:1px solid var(--border)">查看运行中的脚本，可暂停/继续/停止/重启</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">📝 编辑打招呼语</td><td style="padding:6px 8px;border:1px solid var(--border)">改发给招聘者的话术</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">顶部 Session 下拉</td><td style="padding:6px 8px;border:1px solid var(--border)">切换查看不同历史任务</td></tr>
+    </table>
+
+    <h3 style="font-size:14px;margin:20px 0 8px">💡 重要提示</h3>
+    <ul style="font-size:12px;line-height:1.9;padding-left:20px;margin:0;color:var(--dim)">
+      <li>爬取和打招呼期间，<strong>别关掉浏览器窗口</strong>（它要登录态才能操作）。</li>
+      <li>「打招呼」是<strong>真的会发给招聘者</strong>，建议先勾「先试第一条」确认成功再批量。</li>
+      <li>爬取会自动去重，同一岗位不会重复抓，放心续爬。</li>
+      <li>岗位列表可点开看详情，右侧可手动改优先级。</li>
+      <li>任何环节卡住，看右下角 🛠️ 任务面板，可暂停或停止后重来。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 任务管理器（右下角可伸缩） -->
+<div id="taskFab" onclick="toggleTaskPanel()" style="position:fixed;right:20px;bottom:20px;z-index:3000;background:var(--accent);color:#fff;border-radius:50%;width:52px;height:52px;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,0.4);font-size:22px;user-select:none" title="任务管理器">
+  🛠️
+  <span id="taskFabBadge" style="position:absolute;top:-4px;right:-4px;background:var(--red);border-radius:12px;min-width:20px;height:20px;font-size:11px;display:none;align-items:center;justify-content:center;padding:0 5px;font-weight:700">0</span>
+</div>
+<div id="taskPanel" style="display:none;position:fixed;right:20px;bottom:82px;width:340px;max-height:440px;overflow-y:auto;background:var(--card);border:1px solid var(--border);border-radius:12px;z-index:3000;box-shadow:0 8px 30px rgba(0,0,0,0.5);padding:14px">
+  <div style="display:flex;align-items:center;margin-bottom:10px">
+    <h3 style="flex:1;font-size:14px;margin:0">🛠️ 任务管理器</h3>
+    <button class="btn-mini" onclick="toggleTaskPanel()" style="font-size:11px">收起</button>
+  </div>
+  <div id="taskList"><div class="no-data">暂无任务</div></div>
+</div>
+
+</body>
+</html>
