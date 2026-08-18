@@ -1,6 +1,10 @@
 # boss-pipeline
 
 Boss 直聘全流程自动化：爬取 JD → Agent 判定优先级 → 定时打招呼，含实时监控面板。
+Boss直聘监控.command 打开后可不依赖agent对boss直聘列表页进行爬取
+列表页：在 boss 直聘网页中输出关键词进行搜索，搜索页面则为列表页
+
+依赖反爬浏览器 cloakbrowser，需要提前部署安装：https://github.com/CloakHQ/CloakBrowser
 
 ## 功能
 
