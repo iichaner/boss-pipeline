@@ -2181,11 +2181,27 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def _derive_history_root(output_dir: str) -> str:
-    """从 01_raw/ 目录向上推两级得到 history_root（如 boss直聘一体化/）。"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(output_dir)))
-    if os.path.isdir(root):
-        return root
-    return None
+    """从 01_raw/ 目录向上推两级得到 history_root（如 boss直聘一体化/）。
+
+    自愈：若传入的本身就是历史根（内含 长期- 监控任务或 YYYY-MM-DD- 日期 session），
+    直接用它——启动器回退（output=历史根）时不再把根推错到上层 workspace。
+    """
+    ab = os.path.abspath(output_dir)
+    if os.path.basename(ab) == '01_raw':
+        root = os.path.dirname(os.path.dirname(ab))
+        return root if os.path.isdir(root) else None
+    if os.path.isdir(ab):
+        try:
+            for name in os.listdir(ab):
+                if name.startswith('长期-'):
+                    return ab
+                if len(name) >= 10 and name[:4].isdigit() and name[4:5] == '-' and \
+                   os.path.isdir(os.path.join(ab, name, '01_raw')):
+                    return ab
+        except Exception:
+            pass
+    root = os.path.dirname(os.path.dirname(ab))
+    return root if os.path.isdir(root) else None
 
 
 def start_dashboard_server(output_dir: str, port: int = 8765, background: bool = True,

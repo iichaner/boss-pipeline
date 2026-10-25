@@ -24,9 +24,10 @@ for p in $(seq 8765 8775); do
   fi
 done
 
-# 默认 output-dir：最新的 session 目录
+# 默认 output-dir：最新一次性 session（20*/ 日期前缀，排除 长期- 监控目录：
+# 它顶层没有 01_raw，会被误当最新 session 导致默认视图/历史根全部错位）
 WORKSPACE="$HOME/.openclaw/workspace/boss直聘一体化"
-LATEST=$(ls -td "$WORKSPACE"/*/ 2>/dev/null | head -1)
+LATEST=$(ls -td "$WORKSPACE"/20*/ 2>/dev/null | head -1)
 OUTPUT_DIR="${LATEST}01_raw"
 
 if [ ! -d "$OUTPUT_DIR" ]; then
@@ -49,7 +50,7 @@ fi
 echo "▶ 使用 Python: $PYTHON_BIN"
 
 # 后台启动服务器
-"$PYTHON_BIN" "$DASHBOARD_SCRIPT" --output-dir "$OUTPUT_DIR" --port $PORT &
+"$PYTHON_BIN" "$DASHBOARD_SCRIPT" --output-dir "$OUTPUT_DIR" --history-root "$WORKSPACE" --port $PORT &
 SERVER_PID=$!
 
 # 等服务器就绪

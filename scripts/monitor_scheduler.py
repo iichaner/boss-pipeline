@@ -375,16 +375,37 @@ class MonitorScheduler:
             return True
         if running:
             return False
-        # 子进程退出即视为本轮结束，由 progress.json 判定成败
+        # 子进程退出即视为本轮结束，由 progress.json 终态判定成败。
+        # 回归（长期-2026-10-25-总助 第 1 轮）：旧逻辑只拦 error，进程被杀后
+        # progress 停在 running 也被假记成 ok=True/0 条，熔断被架空。
         prog = read_json(os.path.join(a['raw_dir'], 'progress.json'), {}) or {}
         pstat = prog.get('status')
-        ok = pstat not in ('error', 'running')
-        if pstat == 'error':
-            self._finish_round(a, now, ok=False,
-                               error=prog.get('error') or '爬取进程报错退出')
+        scraped = int(prog.get('scraped') or 0)
+        if pstat == 'done' and scraped > 0:
+            self._finish_round(a, now, ok=True)
             return True
-        self._finish_round(a, now, ok=True)
+        if pstat == 'error':
+            err = prog.get('error') or '爬取进程报错退出'
+        elif pstat == 'done':
+            # 正常退出但 0 条：监控列表页不可能空，视为本轮异常
+            err = '本轮抓到 0 条：列表页疑似被风控/验证码拦截或搜索无结果'
+        else:
+            err = f'爬取进程中途死亡（progress 停在“{pstat or "未建立"}”，已抓 {scraped} 条）'
+            tail = self._tail_of(os.path.join(os.path.dirname(a['raw_dir']), 'pipeline.log'))
+            if tail:
+                err += f'；日志尾：{tail}'
+        self._finish_round(a, now, ok=False, error=err)
         return True
+
+    def _tail_of(self, path: str, limit: int = 160) -> str:
+        """取日志尾部非空文本，让告警直接能看到死因。"""
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                data = f.read()
+        except Exception:
+            return ''
+        lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+        return ' / '.join(lines[-2:])[-limit:] if lines else ''
 
     def _finish_round(self, a: dict, now: datetime, ok: bool, error: str = None):
         mid, rname, round_no = a['monitor_id'], a['round_name'], a['round_no']
@@ -424,6 +445,8 @@ class MonitorScheduler:
                                    'new': 0, 'missing': 0, 'scraped': 0,
                                    'total': task.get('stats', {}).get('total_jobs', 0),
                                    'changed': 0, 'error': error}
+            self.store.append_alert(task, 'warn', 'round_failed',
+                                    error or '本轮失败')
             self._log(mid, f'第 {round_no} 轮失败：{error}')
 
         task['rounds'] = round_no
@@ -735,6 +758,73 @@ if __name__ == '__main__':
             assert t5['status'] == 'running' and t5['guard_fail_streak'] == 0
             assert t5['login']['last_login_verified_at']
             print('relogin OK')
+        # 失败轮判定：进程中途死/完成但 0 条，都必须计入失败轮并触发熔断
+        # （回归 2026-10-25：旧版把这两种情况假记成功，熔断形同虚设）
+        class DeadRunner(FakeRunner):
+            def __init__(self, mode='hang'):
+                super().__init__()
+                self.mode = mode
+
+            def start_crawl(self, params):
+                self.calls.append(params)
+                raw = params['output_dir']
+                os.makedirs(raw, exist_ok=True)
+                if self.mode == 'hang':
+                    atomic_write_json(os.path.join(raw, 'progress.json'),
+                                      {'status': 'running', 'scraped': 0})
+                else:
+                    atomic_write_json(os.path.join(raw, 'progress.json'),
+                                      {'status': 'done', 'scraped': 0})
+                    atomic_write_json(os.path.join(raw, 'jobs_cache.json'), [])
+                return {'ok': True, 'pid': 777}
+
+            def status(self):
+                return {'running': False, 'kind': 'crawl', 'pid': None}
+
+        with tempfile.TemporaryDirectory() as td6:
+            import glob as _glob
+            st6 = MonitorStore(td6)
+            sch_f = MonitorScheduler(st6, DeadRunner('hang'), guard=FakeGuard(),
+                                     tick_seconds=1, log=lambda m: None)
+            mid6, _ = st6.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=死'})
+            for i in range(3):
+                t6 = st6.load(mid6)
+                t6['next_run_at'] = f'2026-10-26T{15 + i}:00:00'
+                st6.save(t6)
+                sch_f._tick(datetime(2026, 10, 26, 15 + i, 0))
+                sch_f._tick(datetime(2026, 10, 26, 15 + i, 1))
+                t6 = st6.load(mid6)
+                assert t6['stats']['failed_rounds'] == i + 1, (i, t6['stats'])
+                assert t6['consecutive_failures'] == i + 1, t6
+                assert t6['status'] == ('paused' if i == 2 else 'running'), (i, t6['status'])
+            assert t6['status'] == 'paused', t6['status']
+            codes = [a['code'] for a in t6['alerts']]
+            assert 'round_failed' in codes and 'auto_paused' in codes, codes
+            sps = _glob.glob(os.path.join(st6.rounds_dir(mid6), '*', 'summary.json'))
+            summaries = [json.load(open(s, encoding='utf-8')) for s in sps]
+            assert len(summaries) == 3 and all(s['ok'] is False for s in summaries), summaries
+            assert all('中途死亡' in (s.get('error') or '') for s in summaries), summaries
+            # 失败轮不得污染跨轮去重集
+            seen = json.load(open(st6.seen_path(mid6), encoding='utf-8'))
+            assert len(seen) == 0, seen
+            print('failed-round breaker OK')
+
+        with tempfile.TemporaryDirectory() as td7:
+            import glob as _glob7
+            st7 = MonitorStore(td7)
+            sch_g = MonitorScheduler(st7, DeadRunner('zero'), guard=FakeGuard(),
+                                     tick_seconds=1, log=lambda m: None)
+            mid7, _ = st7.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=空'})
+            t7 = st7.load(mid7)
+            t7['next_run_at'] = '2026-10-26T15:00:00'
+            st7.save(t7)
+            sch_g._tick(datetime(2026, 10, 26, 15, 0))
+            sch_g._tick(datetime(2026, 10, 26, 15, 1))
+            t7 = st7.load(mid7)
+            assert t7['stats']['failed_rounds'] == 1, t7['stats']
+            sp7 = _glob7.glob(os.path.join(st7.rounds_dir(mid7), '*', 'summary.json'))[0]
+            assert '0 条' in (json.load(open(sp7, encoding='utf-8')).get('error') or ''), sp7
+            print('zero-scraped fail OK')
         print('monitor_scheduler self-test PASS')
         sys.exit(0)
     print('用法: python3 monitor_scheduler.py --self-test')
