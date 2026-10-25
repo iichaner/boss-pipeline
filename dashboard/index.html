@@ -420,6 +420,14 @@
 <div class="pathbar">
   <button class="btn-mini green" id="btnOpenFolder" onclick="openFolder()">打开源数据</button>
   <button class="btn-mini cyan" id="btnCopyUrl" onclick="copySearchUrl()" title="复制列表页链接">🔗 复制列表页链接</button>
+  <span id="monOps" style="display:none;align-items:center;gap:6px;flex-wrap:wrap;padding-left:8px;border-left:1px solid var(--border)">
+    <button class="btn-mini green" id="monBtnToggle" onclick="monToggleRun()">🟢 启动</button>
+    <button class="btn-mini cyan" onclick="monAct('run-now')">⚡ 立即一轮</button>
+    <button class="btn-mini" onclick="monEditParams()">⚙️ 参数</button>
+    <button class="btn-mini" onclick="monAct('relogin')">🔑 重登校验</button>
+    <button class="btn-mini" onclick="openFolderMonitor()">📂 目录</button>
+    <button class="btn-mini" id="monBtnStop" onclick="monAct('stop')" style="background:var(--red);color:#fff">⏹ 终止</button>
+  </span>
   <div class="filter-group">
     <label>地区:</label>
     <input class="filter-input wide" id="filterRegion" list="regionOptions" placeholder="选择或输入地区" oninput="applyFilters()">
@@ -455,6 +463,24 @@
 
 <div class="main">
   <div class="dashboard">
+    <!-- 长期监控状态卡：顶栏「🛰️ 长期监控任务」下拉选中时显示在本列顶部 -->
+    <div class="stat-card" id="monDashCard" style="display:none;border:1px solid var(--purple)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="stat-label" style="margin:0;color:var(--purple)">🛰️ 监控</span>
+        <span id="monDashTitle" style="flex:1;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <span id="monDashStatus" style="font-size:11px;white-space:nowrap"></span>
+      </div>
+      <div id="monDashCountdown" style="font-size:11px;color:var(--dim);margin-top:4px"></div>
+      <div class="grid-2" style="margin-top:8px" id="monDashGrid"></div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:8px">
+        <span style="font-size:11px;color:var(--dim);white-space:nowrap">查看轮次</span>
+        <select class="filter-input" id="monRoundSelect" onchange="monSwitchRound()" style="flex:1;min-width:0;font-size:11px"></select>
+        <button class="btn-mini cyan" onclick="monRoundDiff()" title="本轮新增/未出现/JD变更明细">差异</button>
+      </div>
+      <div id="monDashAlerts" style="margin-top:2px"></div>
+      <div style="font-size:10px;color:var(--dim);margin-top:6px">中列岗位=所选轮次（可判定/打招呼）· 启停/立即一轮/参数在任务栏</div>
+    </div>
+
     <div class="stat-card">
       <div class="stat-label">累计已爬 / 列表页岗位数</div>
       <div class="stat-value"><span id="scraped">0</span> <small>/ <span id="listTotal">0</span></small></div>
@@ -551,16 +577,7 @@
 </div>
 
 <!-- 全局统计视图 -->
-<!-- 长期监控任务面板 -->
-<div id="monitorView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1500;overflow-y:auto;padding:24px">
-  <div style="max-width:1000px;margin:0 auto">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-      <h2 id="mvTitle" style="flex:1;font-size:18px">🛰️ 长期监控任务</h2>
-      <button class="btn-mini" onclick="closeMonitorView()" style="background:var(--border);color:#fff">✕ 关闭</button>
-    </div>
-    <div id="mvBody"></div>
-  </div>
-</div>
+<!-- 长期监控已融合进主三栏：状态卡见左侧 dashboard 顶部，操作按钮见任务栏 -->
 
 <!-- 单轮差异详情 -->
 <div id="roundView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1600;overflow-y:auto;padding:24px">
@@ -970,6 +987,7 @@ async function loadSessions() {
     }
   }
   sel.onchange = () => {
+    if (currentMonitorId) closeMonitorChrome();   // 切回一次性任务：收起监控外观
     currentSession = sel.value;
     jobDescriptions = {};
     pollProgress();
@@ -2030,6 +2048,12 @@ async function pollJobs() {
       applyFilters();
       updatePriorityStats();
       if (window.updateFlowGuide) updateFlowGuide();
+      // 监控模式空轮提示：比「暂无数据」更能说明下一步
+      if (currentMonitorId && !allJobs.length) {
+        document.getElementById('jobList').innerHTML =
+          '<div class="no-data">🛰️ 本轮还没有岗位数据<br>' +
+          '<span style="font-size:11px">任务启动后开抓即实时写入本页；暂停中的任务点任务栏「🟢 启动」</span></div>';
+      }
       // 填充地区 datalist（仅首次）
       if (!document.getElementById('regionOptions').children.length && allJobs.length > 0) {
         const regions = [...new Set(allJobs.map(function(j) { return j['区域'] || j['城市'] || ''; }).filter(Boolean))].sort();
@@ -2179,6 +2203,8 @@ var currentMonitorId = null;      // 面板打开的任务
 var monitorPanelTimer = null;
 var lastRoundSeen = {};           // 防止同一轮重复弹窗
 var monitorAlertsShown = {};      // 已弹过的告警 key
+var monViewedRound = null;        // 当前在主三栏查看的监控轮次目录名
+var monFollowActive = true;       // 新轮开抓时自动跟随到实时视图
 
 function mapi(path, method, body) {
   // 监控接口不掺 session 参数（任务跨 session），但要绕浏览器缓存
@@ -2261,11 +2287,11 @@ function createMonitor() {
     if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     if (res.error) { toast('创建失败: ' + res.error, true); return; }
     toast(res.monitor && res.monitor.status === 'paused'
-          ? '🛰️ 监控任务已创建（未启动），可在监控面板点「启动」'
-          : '🛰️ 监控任务已创建，第一轮即将开始');
+          ? '🛰️ 监控任务已创建（未启动）。选中它后点任务栏「🟢 启动」开跑'
+          : '🛰️ 监控任务已创建，第一轮即将开始，岗位列表实时更新');
     closeCrawlModal();
     loadMonitors();
-    if (res.monitor) openMonitorPanel(res.monitor.monitor_id);
+    if (res.monitor) selectMonitor(res.monitor.monitor_id);
   }).catch(function(e) {
     if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     toast('创建异常: ' + e, true);
@@ -2297,12 +2323,9 @@ function loadMonitors() {
         sel.appendChild(o);
       });
       if (cur) sel.value = cur;
-      sel.onchange = function() { if (sel.value) openMonitorPanel(sel.value); };
+      sel.onchange = function() { if (sel.value) selectMonitor(sel.value); else exitMonitor(); };
     }
     renderMonitorBanner(res && res.alerts);
-    if (currentMonitorId && document.getElementById('monitorView').style.display !== 'none') {
-      renderMonitorPanel(currentMonitorId);
-    }
     if (res && !res.scheduler_running && monitorsData.length) {
       toast('⚠️ 监控调度器未运行，任务不会自动执行', true);
     }
@@ -2346,7 +2369,7 @@ function renderMonitorBanner(alerts) {
   });
   if (!msgs.length) { bar.style.display = 'none'; return; }
   txt.textContent = '⚠️ ' + msgs.slice(0, 3).join('　·　') +
-                    (msgs.length > 3 ? '（共 ' + msgs.length + ' 条，详见监控面板）' : '');
+                    (msgs.length > 3 ? '（共 ' + msgs.length + ' 条，详见左侧监控卡）' : '');
   bar.style.display = 'flex';
 }
 
@@ -2413,8 +2436,8 @@ function showRoundReport(m, lr, activeRound) {
         '<div style="color:var(--dim);font-size:12px;margin-top:8px">下一轮：' + nextTxt + ' 后</div>' +
       '</div>' +
       '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
-        '<button class="btn-mini" onclick="this.closest(\'div[style*=inset]\').remove();openMonitorPanel(\'' +
-          monEsc(m.monitor_id) + '\')">查看面板</button>' +
+        '<button class="btn-mini" onclick="this.closest(\'div[style*=inset]\').remove();selectMonitor(\'' +
+          monEsc(m.monitor_id) + '\')">查看本轮岗位</button>' +
         '<button class="btn-mini green" onclick="this.closest(\'div[style*=inset]\').remove()">知道了</button>' +
       '</div>' +
     '</div>';
@@ -2422,127 +2445,185 @@ function showRoundReport(m, lr, activeRound) {
   setTimeout(function() { if (head.parentNode) head.remove(); }, 20000);
 }
 
-// ── 监控面板 ──
-function openMonitorPanel(mid) {
-  currentMonitorId = mid;
-  document.getElementById('monitorView').style.display = 'block';
-  renderMonitorPanel(mid);
-  if (monitorPanelTimer) clearInterval(monitorPanelTimer);
-  monitorPanelTimer = setInterval(function() {
-    if (document.getElementById('monitorView').style.display === 'none') {
-      clearInterval(monitorPanelTimer); monitorPanelTimer = null; return;
-    }
-    renderMonitorPanel(currentMonitorId);
-  }, 15000);
-}
+// ── 监控视图：融入主三栏（状态卡 + 轮次下拉 + 岗位列表复用主页面）──
+var monActiveRound = null;   // 当前进行中轮次 {monitor_id, round_name, round_no}
+var monStatusCache = {};     // renderMonitorDash 最近拿到的 status
 
-function closeMonitorView() {
-  document.getElementById('monitorView').style.display = 'none';
+function closeMonitorChrome() {
+  // 只收外观、不回滚 session 轮询（调用方自己设 currentSession 并重新轮询）
   currentMonitorId = null;
+  monViewedRound = null;
+  monActiveRound = null;
+  document.getElementById('monDashCard').style.display = 'none';
+  document.getElementById('monOps').style.display = 'none';
+  var ms = document.getElementById('monitorSelect');
+  if (ms) ms.value = '';
   if (monitorPanelTimer) { clearInterval(monitorPanelTimer); monitorPanelTimer = null; }
 }
 
-function monCard(label, value, color, hint) {
-  return '<div class="stat-card" style="flex:1;min-width:130px">' +
-    '<div style="font-size:11px;color:var(--dim)">' + label + '</div>' +
-    '<div style="font-size:20px;font-weight:700;color:' + (color || 'var(--text)') + '">' + value + '</div>' +
-    (hint ? '<div style="font-size:10px;color:var(--dim);margin-top:2px">' + hint + '</div>' : '') +
-    '</div>';
+function exitMonitor() {
+  if (!currentMonitorId) return;
+  closeMonitorChrome();
+  var ss = document.getElementById('sessionSelect');
+  currentSession = ss ? ss.value : '';
+  jobDescriptions = {};
+  pollProgress();
+  pollJobs();
+  updateJudgeSource();
+  updateGreetingSource();
 }
 
-function renderMonitorPanel(mid) {
+function selectMonitor(mid) {
+  if (currentMonitorId !== mid) monViewedRound = null;
+  currentMonitorId = mid;
+  monFollowActive = true;
+  document.getElementById('monDashCard').style.display = 'block';
+  document.getElementById('monOps').style.display = 'inline-flex';
+  renderMonitorDash(mid, true);
+  if (monitorPanelTimer) clearInterval(monitorPanelTimer);
+  monitorPanelTimer = setInterval(function() {
+    if (currentMonitorId) renderMonitorDash(currentMonitorId, false);
+  }, 15000);
+}
+
+function monDashCountdownHtml(m) {
+  if (!m) return '';
+  var extra = m.login_stale ? ' · 🔑 登录态待刷新' : '';
+  if (monActiveRound && monActiveRound.monitor_id === m.monitor_id) {
+    return '⟳ 第 ' + (monActiveRound.round_no != null ? monActiveRound.round_no : '?') +
+           ' 轮爬取进行中，岗位列表实时刷新' + extra;
+  }
+  if (m.status === 'running') {
+    var at = m.next_run_at ? '（' + m.next_run_at.replace('T', ' ').slice(5, 16) + '）' : '';
+    return '⏳ 下一轮 ' + fmtLeft(m.next_run_in) + ' 后' + at + extra;
+  }
+  if (m.status === 'paused') return '🟡 已暂停 —— 点任务栏「🟢 启动」恢复排期';
+  if (m.status === 'expired') return '⏰ 监控时长已到期，历史轮次仍可查看';
+  if (m.status === 'stopped') return '⚪ 已终止，历史轮次仍可查看';
+  if (m.status === 'blocked') return '⛔ 已阻塞：' + monEsc(
+    (m.alerts && m.alerts.length) ? m.alerts[m.alerts.length - 1].message : '等待解除');
+  return monEsc(m.status);
+}
+
+function monSwitchRound() {
+  var sel = document.getElementById('monRoundSelect');
+  if (!sel || !currentMonitorId) return;
+  monViewedRound = sel.value || null;
+  monFollowActive = false;   // 手动选轮后不再自动跳到进行中轮
+  monApplyRound();
+}
+
+function monApplyRound() {
+  if (!currentMonitorId) return;
+  var sess = currentMonitorId + '@' + (monViewedRound || 'latest');
+  if (currentSession === sess) return;
+  currentSession = sess;
+  jobDescriptions = {};
+  pollProgress();
+  pollJobs();
+  updateJudgeSource();
+  updateGreetingSource();
+}
+
+function monRoundDiff() {
+  if (!currentMonitorId) return;
+  if (monActiveRound && monActiveRound.monitor_id === currentMonitorId &&
+      monViewedRound === monActiveRound.round_name) {
+    toast('本轮还在进行中，结束后可看差异报告', true);
+    return;
+  }
+  if (!monViewedRound) { toast('还没有已完成的轮次', true); return; }
+  monRound(monViewedRound);
+}
+
+function monToggleRun() {
+  if (!currentMonitorId) return;
+  monAct(monStatusCache[currentMonitorId] === 'running' ? 'pause' : 'resume');
+}
+
+function renderMonitorDash(mid, pick) {
   if (!mid) return;
-  mapi('api/monitor' + '?id=' + encodeURIComponent(mid)).then(function(res) {
-    if (res.error) {
-      document.getElementById('mvBody').innerHTML =
-        '<div style="color:var(--red);padding:20px">' + monEsc(res.error) + '</div>';
+  mapi('api/monitor?id=' + encodeURIComponent(mid)).then(function(res) {
+    if (!res || res.error || !res.monitor) {
+      var el = document.getElementById('monDashCountdown');
+      if (el) el.innerHTML = '<span style="color:var(--red)">' +
+        monEsc(res && res.error ? res.error : '读取监控状态失败') + '</span>';
       return;
     }
     var m = res.monitor, rounds = res.rounds || [];
-    document.getElementById('mvTitle').textContent = '🛰️ ' + m.monitor_id;
-    var stIcon = {running:'🟢 运行中', paused:'🟡 已暂停', stopped:'⚪ 已终止',
-                  expired:'⏰ 已到期', blocked:'⛔ 阻塞'}[m.status] || m.status;
-    var stColor = m.status === 'running' ? 'var(--green)' :
-                  (m.status === 'paused' ? 'var(--yellow)' : 'var(--dim)');
+    monStatusCache[mid] = m.status;
+    monActiveRound = (res.active_round && res.active_round.monitor_id === mid) ? res.active_round : null;
+
+    document.getElementById('monDashTitle').textContent = m.label || m.monitor_id;
+    var stIcon = { running: '🟢 运行中', paused: '🟡 已暂停', stopped: '⚪ 已终止',
+                   expired: '⏰ 已到期', blocked: '⛔ 阻塞' }[m.status] || m.status;
+    document.getElementById('monDashStatus').innerHTML = '<span style="color:' +
+      (m.status === 'running' ? 'var(--green)' : (m.status === 'paused' ? 'var(--yellow)' : 'var(--dim)')) +
+      '">' + stIcon + '</span>';
+    document.getElementById('monDashCountdown').innerHTML = monDashCountdownHtml(m);
+
     var s = m.stats || {};
-    var html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">' +
-      monCard('状态', stIcon, stColor, m.login_stale ? '⚠️ 登录态待刷新' : '') +
-      monCard('下次执行', fmtLeft(m.next_run_in), 'var(--accent)',
-              m.next_run_at ? m.next_run_at.replace('T', ' ').slice(0,16) : '未排期') +
-      monCard('已爬轮次', (m.rounds || 0) + ' 轮', null,
-              '间隔 ' + m.interval_hours + 'h' + (m.duration_hours > 0 ? ' / 共 ' + m.duration_hours + 'h' : ' / 不限时长')) +
-      monCard('岗位总数', s.total_jobs || 0, 'var(--green)', '全局去重') +
-      monCard('累计新增', s.new_total || 0, 'var(--purple)',
-              '未出现 ' + (s.missing_total || 0) + ' / 变更 ' + (s.changed_total || 0)) +
-      monCard('失败轮次', s.failed_rounds || 0, (s.failed_rounds ? 'var(--red)' : null),
-              m.remaining_hours != null ? '剩余 ' + m.remaining_hours + ' 小时' : '') +
-      '</div>';
+    document.getElementById('monDashGrid').innerHTML = [
+      ['已爬轮次', (m.rounds || 0) + ' 轮', '间隔 ' + m.interval_hours + 'h'],
+      ['岗位总数', s.total_jobs || 0, '累计新增 +' + (s.new_total || 0)],
+      ['未出现/变更', (s.missing_total || 0) + ' / ' + (s.changed_total || 0),
+        m.remaining_hours != null ? '剩余 ' + m.remaining_hours + 'h' : '不限时长'],
+      ['失败轮次', s.failed_rounds || 0,
+        (m.login && m.login.relogin_after_hours) ? '重登阈值 ' + m.login.relogin_after_hours + 'h' : '']
+    ].map(function(c) {
+      return '<div class="mini-card"><div class="stat-label">' + c[0] +
+        '</div><div class="stat-value" style="font-size:15px">' + c[1] +
+        '</div><div style="font-size:10px;color:var(--dim)">' + monEsc(c[2]) + '</div></div>';
+    }).join('');
 
-    // 配置行
-    html += '<div class="stat-card" style="margin-bottom:14px;font-size:12px;line-height:2">' +
-      '<div>🔗 列表页：<span style="color:var(--dim);word-break:break-all">' + monEsc(m.list_url) + '</span></div>' +
-      '<div>⏱ 间隔 <b>' + m.interval_hours + '</b> 小时　·　🌙 夜间禁跑 <b>' +
-        monEsc((m.quiet_hours||[]).join(' – ')) + '</b>　·　🔑 登录刷新阈值 <b>' +
-        (m.login ? m.login.relogin_after_hours : 48) + '</b> 小时' +
-        (m.login && m.login.last_login_verified_at
-          ? '（上次验证 ' + m.login.last_login_verified_at.replace('T',' ').slice(0,16) + '）' : '（尚未验证）') +
-      '</div>' +
-      '<div>🎛 滚动参数：max_scroll <b>' + m.scroll.max_scroll + '</b> / max_jobs <b>' + m.scroll.max_jobs +
-        '</b> / 等待 <b>' + m.scroll.base_wait + 's</b> / 滚动间隔 <b>' + m.scroll.scroll_wait + 's</b>' +
-        ' / 距离 <b>' + m.scroll.scroll_delta + 'K</b></div>' +
-      (m.last_round && !m.last_round.ok
-        ? '<div style="color:var(--red)">❌ 上轮失败：' + monEsc(m.last_round.error || '') + '</div>' : '') +
-      '</div>';
-
-    // 操作按钮
-    var ops = [];
-    if (m.status !== 'running') ops.push('<button class="btn-mini green" onclick="monAct(\'resume\')">🟢 启动/恢复</button>');
-    if (m.status === 'running') ops.push('<button class="btn-mini" onclick="monAct(\'pause\')" style="background:var(--yellow);color:#000">🟡 暂停</button>');
-    ops.push('<button class="btn-mini cyan" onclick="monAct(\'run-now\')">⚡ 立即执行一轮</button>');
-    ops.push('<button class="btn-mini" onclick="monEditParams()">⚙️ 调整参数</button>');
-    ops.push('<button class="btn-mini" onclick="monAct(\'relogin\')">🔑 重新登录校验</button>');
-    if (m.status !== 'stopped') ops.push('<button class="btn-mini" onclick="monAct(\'stop\')" style="background:var(--red);color:#fff">⏹ 终止任务</button>');
-    ops.push('<button class="btn-mini" onclick="openFolderMonitor()">📂 打开目录</button>');
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">' + ops.join('') + '</div>';
-
-    // 轮次表
-    html += '<h3 style="font-size:14px;margin-bottom:8px">轮次历史（' + rounds.length + '）</h3>';
-    if (!rounds.length) {
-      html += '<div style="color:var(--dim);font-size:12px">还没有完成的轮次。' +
-              (m.status === 'running' ? '首轮正在进行中…' : '任务处于 ' + m.status + ' 状态，启动后才会执行。') + '</div>';
-    } else {
-      html += '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-        '<tr style="color:var(--dim);text-align:left">' +
-        '<th style="padding:6px">轮次</th><th>时间</th><th>抓到</th><th>新增</th>' +
-        '<th>未出现</th><th>疑似下架</th><th>JD变更</th><th>累计</th><th>状态</th><th></th></tr>';
-      rounds.forEach(function(r) {
-        html += '<tr style="border-top:1px solid var(--border)">' +
-          '<td style="padding:6px">#' + (r.round == null ? '-' : r.round) + '</td>' +
-          '<td>' + (r.at ? r.at.replace('T',' ').slice(0,16) : '-') + '</td>' +
-          '<td>' + (r.scraped == null ? '-' : r.scraped) + '</td>' +
-          '<td style="color:var(--green)">+' + (r.new || 0) + '</td>' +
-          '<td style="color:var(--yellow)">' + (r.missing || 0) + '</td>' +
-          '<td>' + (r.suspected || 0) + '</td>' +
-          '<td>' + (r.changed || 0) + '</td>' +
-          '<td>' + (r.total == null ? '-' : r.total) + '</td>' +
-          '<td style="color:' + (r.ok ? 'var(--green)' : 'var(--red)') + '">' +
-            (r.ok ? '✅' : '❌ ' + monEsc(r.error || '')) + '</td>' +
-          '<td><button class="btn-mini" onclick="monRound(\'' + monEsc(r.name) + '\')">明细</button></td>' +
-          '</tr>';
-      });
-      html += '</table>';
+    // 轮次下拉：进行中轮置顶；pick/自动跟随时切换 currentSession 拉取该轮数据
+    var sel = document.getElementById('monRoundSelect');
+    var opts = [];
+    if (monActiveRound && monActiveRound.round_name) {
+      opts.push({ name: monActiveRound.round_name,
+                  label: '⟳ 第' + (monActiveRound.round_no != null ? monActiveRound.round_no : '?') + '轮 进行中' });
     }
-    // 告警区
-    var als = (m.alerts || []).filter(function(a){ return !a.acked; });
-    if (als.length) {
-      html += '<h3 style="font-size:14px;margin:16px 0 8px">未处理告警</h3>';
-      als.slice(-10).reverse().forEach(function(a) {
-        var c = a.level === 'error' ? 'var(--red)' : (a.level === 'warn' ? 'var(--yellow)' : 'var(--dim)');
-        html += '<div style="font-size:12px;color:' + c + ';padding:4px 0">· [' +
-                a.at.replace('T',' ').slice(0,16) + '] ' + monEsc(a.message) + '</div>';
-      });
+    rounds.forEach(function(r) {
+      if (monActiveRound && r.name === monActiveRound.round_name) return;
+      opts.push({ name: r.name,
+                  label: (r.round != null ? '第' + r.round + '轮 ' : '') +
+                    (r.at ? r.at.replace('T', ' ').slice(5, 16) : r.name) +
+                    ' · +' + (r.new || 0) + '新增' + (r.ok ? '' : ' ⚠失败') });
+    });
+    var chosen = null;
+    if (monFollowActive && monActiveRound && monActiveRound.round_name) {
+      chosen = monActiveRound.round_name; monFollowActive = false;
+    } else if (pick && opts.length) chosen = opts[0].name;
+    else if (monViewedRound && opts.some(function(o) { return o.name === monViewedRound; })) chosen = monViewedRound;
+    else if (opts.length) chosen = opts[0].name;
+    monViewedRound = chosen;
+    if (sel) {
+      sel.innerHTML = opts.length
+        ? opts.map(function(o) {
+            return '<option value="' + monEsc(o.name) + '">' + monEsc(o.label) + '</option>';
+          }).join('')
+        : '<option value="">（暂无轮次）</option>';
+      sel.value = chosen || '';
+      sel.disabled = !opts.length;
     }
-    document.getElementById('mvBody').innerHTML = html;
+
+    // 未处理告警（最多 3 条，折叠在状态卡底部）
+    var als = (m.alerts || []).filter(function(a) { return !a.acked; });
+    var alEl = document.getElementById('monDashAlerts');
+    alEl.innerHTML = als.length
+      ? als.slice(-3).reverse().map(function(a) {
+          var c = a.level === 'error' ? 'var(--red)' : (a.level === 'warn' ? 'var(--yellow)' : 'var(--dim)');
+          return '<div style="font-size:10px;color:' + c + '">· [' +
+                 (a.at || '').replace('T', ' ').slice(5, 16) + '] ' + monEsc(a.message) + '</div>';
+        }).join('')
+      : '';
+
+    var tog = document.getElementById('monBtnToggle');
+    if (tog) tog.innerHTML = m.status === 'running' ? '🟡 暂停' : '🟢 启动';
+    var stp = document.getElementById('monBtnStop');
+    if (stp) stp.style.display = (m.status === 'stopped' || m.status === 'expired') ? 'none' : '';
+
+    monApplyRound();
   });
 }
 
@@ -2554,12 +2635,14 @@ function monAct(action) {
     if (action === 'relogin') {
       toast(res.ok ? '✅ 登录态已刷新：' + (res.msg || '通过') : '⚠️ 校验未通过：' + (res.msg || res.code), !res.ok);
     } else if (action === 'run_now' || action === 'run-now') {
-      toast('⚡ 已触发一轮，稍后看面板');
+      toast('⚡ 已触发一轮，开始抓取后岗位列表实时刷新');
+      monFollowActive = true;
+      setTimeout(function() { if (currentMonitorId) renderMonitorDash(currentMonitorId, true); }, 2000);
     } else if (res.status) {
       toast('状态 → ' + res.status);
     }
     loadMonitors();
-    renderMonitorPanel(currentMonitorId);
+    if (currentMonitorId) renderMonitorDash(currentMonitorId, false);
   });
 }
 
@@ -2608,7 +2691,7 @@ function monSaveParams(btn) {
     var ov = btn ? btn.closest('div[style*=inset]') : null;
     if (ov) ov.remove();
     loadMonitors();
-    renderMonitorPanel(currentMonitorId);
+    if (currentMonitorId) renderMonitorDash(currentMonitorId, false);
   });
 }
 
@@ -2672,6 +2755,12 @@ function tickMonitorCountdown() {
   monitorsData.forEach(function(m) {
     if (m.status === 'running' && m.next_run_in != null) m.next_run_in -= 1;
   });
+  if (!currentMonitorId) return;
+  var el = document.getElementById('monDashCountdown');
+  if (!el) return;
+  var cur = null;
+  monitorsData.forEach(function(m) { if (m.monitor_id === currentMonitorId) cur = m; });
+  if (cur) el.innerHTML = monDashCountdownHtml(cur);
 }
 
 async function loadMonitorsAsync() { await loadMonitors(); }
@@ -2721,6 +2810,7 @@ async function loadMonitorsAsync() { await loadMonitors(); }
       <tr><td style="padding:6px 8px;border:1px solid var(--border)">🛠️ 右下角任务</td><td style="padding:6px 8px;border:1px solid var(--border)">查看运行中的脚本，可暂停/继续/停止/重启</td></tr>
       <tr><td style="padding:6px 8px;border:1px solid var(--border)">📝 编辑打招呼语</td><td style="padding:6px 8px;border:1px solid var(--border)">改发给招聘者的话术</td></tr>
       <tr><td style="padding:6px 8px;border:1px solid var(--border)">顶部 Session 下拉</td><td style="padding:6px 8px;border:1px solid var(--border)">切换查看不同历史任务</td></tr>
+      <tr><td style="padding:6px 8px;border:1px solid var(--border)">🛰️ 长期监控下拉</td><td style="padding:6px 8px;border:1px solid var(--border)">选中监控任务后：左侧显示状态/倒计时/轮次卡，任务栏出现启动/暂停/立即一轮按钮，中间列表可直接看每一轮爬到的岗位（可判定可打招呼）</td></tr>
     </table>
 
     <h3 style="font-size:14px;margin:20px 0 8px">💡 重要提示</h3>

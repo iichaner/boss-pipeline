@@ -537,9 +537,35 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     @staticmethod
     def _resolve_session_dir(session_name: str) -> str:
-        """根据 session 名称解析到对应的 01_raw/ 目录。"""
+        """根据 session 名称解析到对应的 01_raw/ 目录。
+
+        除一次性任务 "YYYY-MM-DD-XXX" 外，还支持长期监控轮次格式
+        "<监控ID>@<轮次名|latest>"：主三栏页面（列表/详情/统计/打开源数据）
+        因此无需任何另接口就能直接浏览监控每一轮的爬取产物。
+        """
         if not session_name:
             return DashboardHandler.output_dir
+        if '@' in session_name:
+            mid, _, rname = session_name.partition('@')
+            root = DashboardHandler.history_root
+            # 拒绝路径穿越；只允许 history_root 下的真实监控目录
+            if not root or not mid or not rname or any(s in mid + rname for s in ('/', '\\', '..')):
+                return DashboardHandler.output_dir
+            mdir = os.path.join(root, mid)
+            if not os.path.isdir(mdir) or not mid.startswith('长期-'):
+                return DashboardHandler.output_dir
+            rbase = os.path.join(mdir, 'rounds')
+            if os.path.isdir(rbase):
+                if rname == 'latest':
+                    cands = [n for n in sorted(os.listdir(rbase))
+                             if os.path.isdir(os.path.join(rbase, n, '01_raw'))]
+                    rname = cands[-1] if cands else rname
+                cand = os.path.join(rbase, rname, '01_raw')
+                if os.path.isdir(cand):
+                    return cand
+            # 轮次还不存在（如任务刚建/未启动）：给监控根目录，
+            # 各数据文件缺失时 jobs_cache 自然返回空列表，前端显空态，不会串到别的任务
+            return mdir
         # session 格式为 "YYYY-MM-DD-XXX"
         candidate = os.path.join(DashboardHandler.history_root, session_name, '01_raw')
         if os.path.isdir(candidate):
