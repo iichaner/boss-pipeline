@@ -506,24 +506,44 @@ class MonitorScheduler:
         task = self.store.load(mid)
         if not task:
             return {'error': '任务不存在'}
-        for k in ('interval_hours', 'duration_hours'):
-            if fields.get(k) is not None:
-                task[k] = float(fields[k])
-        if fields.get('duration_hours') is not None and task.get('duration_hours'):
-            base = parse_iso(task.get('started_at')) or datetime.now()
-            task['end_at'] = (base + timedelta(hours=task['duration_hours'])).isoformat(timespec='seconds')
-        elif fields.get('duration_hours') == 0:
-            task['end_at'] = None
-        for k in ('quiet_hours',):
-            if fields.get(k):
-                task[k] = fields[k]
+
+        def _num(key):
+            """只接受能转成数字的值。注意 0 是合法值（= 不限时长），不能当成没传。"""
+            if key not in fields or fields.get(key) is None or fields.get(key) == '':
+                return None
+            try:
+                return max(0.0, float(fields[key]))
+            except (TypeError, ValueError):
+                return None
+
+        iv = _num('interval_hours')
+        du = _num('duration_hours')
+        if iv is not None:
+            task['interval_hours'] = max(1.0, iv)
+        if du is not None:
+            task['duration_hours'] = du
+            if du > 0:
+                # 从“现在”起算：旧版从 started_at 起算，改时长时可能一保存就算到期
+                task['end_at'] = (datetime.now() + timedelta(hours=du)).isoformat(timespec='seconds')
+            else:
+                task['end_at'] = None
+        qh = fields.get('quiet_hours')
+        if isinstance(qh, list) and len(qh) == 2:
+            try:
+                task['quiet_hours'] = [f'{int(str(qh[0]).split(":")[0]):02d}:'
+                                       f'{int(str(qh[0]).split(":")[1] or 0):02d}',
+                                       f'{int(str(qh[1]).split(":")[0]):02d}:'
+                                       f'{int(str(qh[1]).split(":")[1] or 0):02d}']
+            except (ValueError, IndexError):
+                return {'error': f'夜间窗口格式非法：{qh}（应用 HH:MM）'}
         if fields.get('scroll'):
             for k in SCROLL_KEYS:
                 if fields['scroll'].get(k) not in (None, ''):
                     task.setdefault('scroll', {})[k] = fields['scroll'][k]
-        if fields.get('relogin_after_hours') is not None:
-            task.setdefault('login', {})['relogin_after_hours'] = float(fields['relogin_after_hours'])
-        if task.get('status') == 'running' and task.get('next_run_at'):
+        rl = _num('relogin_after_hours')
+        if rl is not None:
+            task.setdefault('login', {})['relogin_after_hours'] = max(1.0, rl)
+        if task.get('status') == 'running':
             task['next_run_at'] = compute_next_run(
                 datetime.now(), task.get('interval_hours') or 3,
                 task.get('quiet_hours') or []).isoformat(timespec='seconds')

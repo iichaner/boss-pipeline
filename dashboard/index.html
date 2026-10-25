@@ -223,7 +223,16 @@
 <!-- 爬取模态窗口 -->
 <div id="crawlModal" class="modal" style="display:none">
   <div class="modal-content">
-    <h3>🕷️ 开始爬取</h3>
+    <h3 id="crawlModalTitle">🕷️ 开始爬取</h3>
+    <div class="form-group">
+      <label>任务类型</label>
+      <div id="taskTypeSeg" style="display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <button type="button" id="typeOnce" onclick="setMonitorMode(false)"
+                style="flex:1;padding:8px 6px;font-size:13px;border:none;cursor:pointer;background:var(--accent);color:#fff;font-weight:600">🕷️ 一次性爬取</button>
+        <button type="button" id="typeMonitor" onclick="setMonitorMode(true)"
+                style="flex:1;padding:8px 6px;font-size:13px;border:none;border-left:1px solid var(--border);cursor:pointer;background:transparent;color:var(--dim)">🛰️ 长期监控任务</button>
+      </div>
+    </div>
     <div class="form-group">
       <label>列表页 URL *</label>
       <input type="text" id="crawlUrl" placeholder="https://www.zhipin.com/web/geek/jobs?query=...">
@@ -287,9 +296,54 @@
               onclick="skipWait()">跳过检查，直接开始</button>
     </div>
 
+    <!-- 长期监控参数区（仅监控模式可见） -->
+    <div id="monitorFields" style="display:none">
+      <div style="font-size:12px;color:var(--purple);font-weight:600;margin:4px 0 10px">🛰️ 长期监控参数</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>爬取间隔（小时）</label>
+          <input type="number" id="monInterval" value="3" step="1" min="1">
+        </div>
+        <div class="form-group">
+          <label>持续时长（小时）</label>
+          <select id="monDuration" class="filter-input" style="width:100%">
+            <option value="24">24</option>
+            <option value="48" selected>48</option>
+            <option value="72">72</option>
+            <option value="0">不限（直到我手动停）</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>登录态刷新阈值（小时）</label>
+          <input type="number" id="monRelogin" value="48" step="1" min="1">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>夜间禁跑开始</label>
+          <input type="text" id="monQuietStart" value="00:00" style="width:80px">
+        </div>
+        <div class="form-group">
+          <label>夜间禁跑结束</label>
+          <input type="text" id="monQuietEnd" value="08:00" style="width:80px">
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end">
+          <label style="font-size:11px;color:var(--dim);line-height:1.5">
+            00:00–08:00 不跑（易触发验证码/风控）。
+            到点落在窗口内会自动顺延到窗口结束。滚动/速度参数用上方「高级设置」。可先创建后不启动。</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="monStartPaused" style="width:auto">
+          <span style="font-size:12px">创建但先不启动（我先确认环境再手动开始）</span>
+        </label>
+      </div>
+    </div>
+
     <div class="modal-actions" id="crawlActions">
       <button class="btn-mini" onclick="closeCrawlModal()">取消</button>
-      <button class="btn-mini green" onclick="startCrawl()">确认开始</button>
+      <button class="btn-mini green" id="modalPrimaryBtn" onclick="submitModal()">确认开始</button>
     </div>
   </div>
 </div>
@@ -330,10 +384,14 @@
   <h1>Boss 直聘求职助手</h1>
   <button class="btn-mini" onclick="toggleUseGuide()" style="background:#f59e0b;color:#fff;font-weight:600" title="第一次使用请看这里">📖 使用说明</button>
   <span class="status-text" id="statusText">连接中...</span>
-  <select class="session-select" id="sessionSelect" title="切换爬取 session">
+  <select class="session-select" id="sessionSelect" title="切换一次性爬取任务">
     <option value="">加载中...</option>
   </select>
-  <button class="btn-mini green" id="btnStartCrawl" onclick="showCrawlModal()">🕷️ 新建爬取任务</button>
+  <select class="session-select" id="monitorSelect" title="长期监控任务"
+          style="border-color:var(--purple);max-width:230px">
+    <option value="">🛰️ 长期监控任务（无）</option>
+  </select>
+  <button class="btn-mini green" id="btnStartCrawl" onclick="showCrawlModal()">➕ 新建任务</button>
   <button class="btn-mini" onclick="toggleStatsView()" style="background:#6366f1;color:#fff">📊 全局统计</button>
   <button class="btn-mini cyan" onclick="openBossMessage()">💬 消息</button>
   <button class="btn-mini" id="btnStopCrawl" onclick="stopCrawl()" style="display:none;background:var(--red)">⏹ 停止</button>
@@ -385,6 +443,14 @@
     </select>
   </div>
   <span id="jobCountDisplay" style="margin-left:8px;font-size:11px;color:var(--dim)"></span>
+</div>
+
+<!-- 长期监控告警黄条（登录态/守卫失败时出现） -->
+<div id="monitorBanner" style="display:none;align-items:center;gap:10px;padding:8px 16px;background:rgba(234,179,8,0.14);border-bottom:1px solid var(--yellow);flex-wrap:wrap;font-size:12px">
+  <span style="font-size:14px">⚠️</span>
+  <span id="monitorBannerText" style="flex:1;min-width:200px"></span>
+  <button class="btn-mini" onclick="refreshLoginFreshness()" style="background:var(--yellow);color:#000;border:none;font-weight:600">🔑 我已重新登录</button>
+  <button class="btn-mini" onclick="dismissMonitorBanner()" style="background:transparent;color:var(--dim);border:1px solid var(--border)">知道了</button>
 </div>
 
 <div class="main">
@@ -485,6 +551,28 @@
 </div>
 
 <!-- 全局统计视图 -->
+<!-- 长期监控任务面板 -->
+<div id="monitorView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1500;overflow-y:auto;padding:24px">
+  <div style="max-width:1000px;margin:0 auto">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <h2 id="mvTitle" style="flex:1;font-size:18px">🛰️ 长期监控任务</h2>
+      <button class="btn-mini" onclick="closeMonitorView()" style="background:var(--border);color:#fff">✕ 关闭</button>
+    </div>
+    <div id="mvBody"></div>
+  </div>
+</div>
+
+<!-- 单轮差异详情 -->
+<div id="roundView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1600;overflow-y:auto;padding:24px">
+  <div style="max-width:900px;margin:0 auto;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <h3 id="rvTitle" style="flex:1;font-size:16px">轮次明细</h3>
+      <button class="btn-mini" onclick="closeRoundView()" style="background:var(--border);color:#fff">✕ 关闭</button>
+    </div>
+    <div id="rvBody"></div>
+  </div>
+</div>
+
 <div id="statsView" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1500;overflow-y:auto;padding:24px">
   <div style="max-width:960px;margin:0 auto;background:var(--card);border-radius:12px;padding:24px;border:1px solid var(--border)">
     <div style="display:flex;align-items:center;margin-bottom:16px">
@@ -1187,6 +1275,10 @@ function showCrawlModal(redo) {
   document.getElementById('crawlModal').style.display = 'flex';
   document.getElementById('loginWait').style.display = 'none';
   document.getElementById('crawlActions').style.display = 'flex';
+  // 重新爬取是一次性语义，不允许在锁定页面上切成长期监控
+  const seg = document.getElementById('taskTypeSeg');
+  if (seg) seg.style.display = redo ? 'none' : 'flex';
+  setMonitorMode(false);
   const urlInput = document.getElementById('crawlUrl');
   const nameInput = document.getElementById('crawlSessionName');
   const modal = document.getElementById('crawlModal');
@@ -1235,6 +1327,7 @@ function showCrawlModal(redo) {
 
 function closeCrawlModal() {
   document.getElementById('crawlModal').style.display = 'none';
+  setMonitorMode(false);
   const modal = document.getElementById('crawlModal');
   modal.dataset.redo = '';
   const urlInput = document.getElementById('crawlUrl');
@@ -1992,6 +2085,9 @@ if (window.location.protocol === 'file:') {
   allTimers.push(setInterval(pollCrawlStatus, 5000));
   pollTasks();
   allTimers.push(setInterval(pollTasks, 2000));
+  loadMonitors();
+  allTimers.push(setInterval(loadMonitors, 20000));
+  allTimers.push(setInterval(tickMonitorCountdown, 1000));
 }
 
 // === 任务管理器（右下角面板） ===
@@ -2073,6 +2169,513 @@ window.addEventListener('beforeunload', function() {
     console.log('已清理 ' + allTimers.length + ' 个定时器');
   }
 });
+// ═══════════════════════════════════════════════════════════
+// === 长期监控任务（P0-3 前端）===
+// ═══════════════════════════════════════════════════════════
+var monitorMode = false;          // 新建弹窗当前模式
+var monitorsData = [];            // /api/monitors 快照
+var monitorAvail = false;
+var currentMonitorId = null;      // 面板打开的任务
+var monitorPanelTimer = null;
+var lastRoundSeen = {};           // 防止同一轮重复弹窗
+var monitorAlertsShown = {};      // 已弹过的告警 key
+
+function mapi(path, method, body) {
+  // 监控接口不掺 session 参数（任务跨 session），但要绕浏览器缓存
+  var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now();
+  var opts = { method: method || 'GET', headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts).then(function(r) {
+    if (!r.ok) return r.json().catch(function(){ return {error:'HTTP '+r.status}; });
+    return r.json();
+  });
+}
+
+function monEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── 新建弹窗：模式切换 ──
+function setMonitorMode(on) {
+  monitorMode = !!on;
+  var f = document.getElementById('monitorFields');
+  var bO = document.getElementById('typeOnce');
+  var bM = document.getElementById('typeMonitor');
+  var btn = document.getElementById('modalPrimaryBtn');
+  if (f) f.style.display = monitorMode ? 'block' : 'none';
+  if (bO) { bO.style.background = monitorMode ? 'transparent' : 'var(--accent)';
+            bO.style.color = monitorMode ? 'var(--dim)' : '#fff'; }
+  if (bM) { bM.style.background = monitorMode ? 'var(--purple)' : 'transparent';
+            bM.style.color = monitorMode ? '#fff' : 'var(--dim)'; }
+  if (btn) btn.textContent = monitorMode ? '🛰️ 开始监控' : '确认开始';
+  var t = document.getElementById('crawlModalTitle');
+  if (t && !document.getElementById('crawlModal').dataset.redo) {
+    t.textContent = monitorMode ? '🛰️ 新建长期监控任务' : '🕷️ 开始爬取';
+  }
+}
+
+function submitModal() {
+  if (monitorMode) createMonitor(); else startCrawl();
+}
+
+function collectScrollParams() {
+  return {
+    max_scroll: parseInt(document.getElementById('crawlMaxScroll').value) || 50,
+    max_jobs: parseInt(document.getElementById('crawlMaxJobs').value) || 300,
+    base_wait: parseInt(document.getElementById('crawlBaseWait').value) || 20,
+    scroll_wait: parseFloat(document.getElementById('crawlScrollWait').value) || 5,
+    scroll_delta: (document.getElementById('crawlScrollDeltaMin').value||'1.5')+'-'+(document.getElementById('crawlScrollDeltaMax').value||'2.5'),
+    job_gap: (document.getElementById('crawlJobGapMin').value||'1.0')+'-'+(document.getElementById('crawlJobGapMax').value||'3.0'),
+    detail_jitter: parseFloat(document.getElementById('crawlDetailJitter').value) || 3
+  };
+}
+
+function createMonitor() {
+  var url = document.getElementById('crawlUrl').value.trim();
+  if (!url) {
+    mapi('api/browser/active-list', 'POST', {}).then(function(active){
+      if (active && active.found) { document.getElementById('crawlUrl').value = active.url; createMonitor(); }
+      else toast('请先填列表页 URL，或在浏览器打开 Boss 列表页', true);
+    });
+    return;
+  }
+  if (url.indexOf('zhipin.com') < 0) { toast('URL 必须包含 zhipin.com', true); return; }
+  var name = document.getElementById('crawlSessionName').value.trim();
+  var body = {
+    url: url, label: name,
+    interval_hours: parseFloat(document.getElementById('monInterval').value) || 3,
+    duration_hours: parseFloat(document.getElementById('monDuration').value),
+    relogin_after_hours: parseFloat(document.getElementById('monRelogin').value) || 48,
+    quiet_hours: [document.getElementById('monQuietStart').value.trim() || '00:00',
+                  document.getElementById('monQuietEnd').value.trim() || '08:00'],
+    scroll: collectScrollParams(),
+    start_paused: document.getElementById('monStartPaused').checked
+  };
+  var btn = document.getElementById('modalPrimaryBtn');
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+  mapi('api/monitor/create', 'POST', body).then(function(res) {
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    if (res.error) { toast('创建失败: ' + res.error, true); return; }
+    toast(res.monitor && res.monitor.status === 'paused'
+          ? '🛰️ 监控任务已创建（未启动），可在监控面板点「启动」'
+          : '🛰️ 监控任务已创建，第一轮即将开始');
+    closeCrawlModal();
+    loadMonitors();
+    if (res.monitor) openMonitorPanel(res.monitor.monitor_id);
+  }).catch(function(e) {
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    toast('创建异常: ' + e, true);
+  });
+}
+
+// ── 监控任务列表与下拉 ──
+function loadMonitors() {
+  return mapi('api/monitors').then(function(res) {
+    monitorAvail = !!(res && res.available);
+    monitorsData = (res && res.monitors) || [];
+    var sel = document.getElementById('monitorSelect');
+    if (sel) {
+      var cur = sel.value;
+      sel.innerHTML = '';
+      var head = document.createElement('option');
+      head.value = '';
+      head.textContent = monitorAvail
+        ? '🛰️ 长期监控任务（' + monitorsData.length + '）'
+        : '🛰️ 监控模块未启用';
+      sel.appendChild(head);
+      monitorsData.forEach(function(m) {
+        var o = document.createElement('option');
+        o.value = m.monitor_id;
+        var icon = m.status === 'running' ? '🟢' : (m.status === 'paused' ? '🟡' :
+                   (m.status === 'expired' ? '⏰' : (m.status === 'stopped' ? '⚪' : '⛔')));
+        o.textContent = icon + ' ' + m.monitor_id + ' (' + (m.rounds || 0) + '轮/' +
+                        ((m.stats && m.stats.total_jobs) || 0) + '岗)';
+        sel.appendChild(o);
+      });
+      if (cur) sel.value = cur;
+      sel.onchange = function() { if (sel.value) openMonitorPanel(sel.value); };
+    }
+    renderMonitorBanner(res && res.alerts);
+    if (currentMonitorId && document.getElementById('monitorView').style.display !== 'none') {
+      renderMonitorPanel(currentMonitorId);
+    }
+    if (res && !res.scheduler_running && monitorsData.length) {
+      toast('⚠️ 监控调度器未运行，任务不会自动执行', true);
+    }
+    checkRoundReports(res && res.active_round);
+  }).catch(function(e) {
+    var sel = document.getElementById('monitorSelect');
+    if (sel && sel.options.length <= 1) sel.innerHTML = '<option value="">🛰️ 监控接口不可用</option>';
+  });
+}
+
+function fmtLeft(sec) {
+  if (sec == null) return '-';
+  if (sec <= 0) return '即将开始';
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return h + ' 小时 ' + m + ' 分';
+  if (m > 0) return m + ' 分 ' + s + ' 秒';
+  return s + ' 秒';
+}
+
+// ── 黄条：登录态与告警 ──
+function renderMonitorBanner(alerts) {
+  var bar = document.getElementById('monitorBanner');
+  var txt = document.getElementById('monitorBannerText');
+  if (!bar || !txt) return;
+  var stale = monitorsData.filter(function(m) {
+    return m.status === 'running' && m.login_stale;
+  });
+  var msgs = [];
+  stale.forEach(function(m) {
+    msgs.push('「' + m.label + '」登录态已 ' + (m.login_age_hours == null ? '从未验证' :
+              m.login_age_hours + ' 小时') + ' 未刷新，建议重新登录');
+  });
+  (alerts || []).forEach(function(a) {
+    if (a.code === 'login_invalid' || a.code === 'auto_paused' || a.level === 'error') {
+      var k = a.monitor_id + '|' + a.code + '|' + a.at;
+      if (!monitorAlertsShown[k]) {
+        msgs.push('「' + (a.label || a.monitor_id) + '」' + a.message);
+        monitorAlertsShown[k] = 1;
+      }
+    }
+  });
+  if (!msgs.length) { bar.style.display = 'none'; return; }
+  txt.textContent = '⚠️ ' + msgs.slice(0, 3).join('　·　') +
+                    (msgs.length > 3 ? '（共 ' + msgs.length + ' 条，详见监控面板）' : '');
+  bar.style.display = 'flex';
+}
+
+function dismissMonitorBanner() {
+  var bar = document.getElementById('monitorBanner');
+  if (bar) bar.style.display = 'none';
+  toast('已确认（新的告警会再次出现）');
+}
+
+function refreshLoginFreshness() {
+  var ids = staleMonitorIds();
+  if (!ids.length) { toast('当前没有超过刷新阈值的监控任务'); return; }
+  Promise.all(ids.map(function(id) {
+    return mapi('api/monitor/relogin', 'POST', {id: id});
+  })).then(function(results) {
+    var ok = results.filter(function(r) { return r && r.ok; }).length;
+    var bad = results.filter(function(r) { return !r || !r.ok; });
+    if (bad.length) {
+      toast('⚠️ ' + bad.length + ' 个任务校验未通过：' + (bad[0].msg || bad[0].code || '未知'), true);
+    } else {
+      toast('✅ 登录态已刷新（' + ok + ' 个任务），环境检查通过');
+    }
+    loadMonitors();
+  });
+}
+
+function staleMonitorIds() {
+  return monitorsData.filter(function(m) { return m.status === 'running' && m.login_stale; })
+                     .map(function(m) { return m.monitor_id; });
+}
+
+// ── 每轮完成弹窗 ──
+function checkRoundReports(activeRound) {
+  monitorsData.forEach(function(m) {
+    var lr = m.last_report;
+    if (!lr || !lr.round) return;
+    var key = m.monitor_id + '#' + lr.round;
+    if (lastRoundSeen[m.monitor_id] === lr.round) return;
+    if (lastRoundSeen[m.monitor_id] == null) { lastRoundSeen[m.monitor_id] = lr.round; return; }
+    lastRoundSeen[m.monitor_id] = lr.round;
+    if (m.status !== 'running') return;   // 已停的任务不弹历史报告
+    showRoundReport(m, lr, activeRound);
+  });
+}
+
+function showRoundReport(m, lr, activeRound) {
+  var head = document.createElement('div');
+  head.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2200;display:flex;align-items:center;justify-content:center';
+  var nextTxt = (m.next_run_in != null) ? fmtLeft(m.next_run_in) : '-';
+  var running = activeRound && activeRound.monitor_id === m.monitor_id
+    ? '<div style="font-size:12px;color:var(--green);margin-top:8px">▶ 第 ' + activeRound.round_no + ' 轮已在进行中</div>' : '';
+  var errLine = lr.error ? '<div style="color:var(--red);font-size:12px;margin-top:8px">❌ ' + monEsc(lr.error) + '</div>' : '';
+  head.innerHTML =
+    '<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:460px;width:92%">' +
+      '<h3 style="font-size:15px;margin-bottom:12px">🛰️ 第 ' + lr.round + ' 轮监控报告</h3>' +
+      '<div style="font-size:13px;line-height:2">' +
+        '<div style="color:var(--dim)">' + monEsc(m.label) + '</div>' +
+        '<div>抓到岗位：<b>' + (lr.scraped || 0) + '</b> 条</div>' +
+        '<div>新增：<b style="color:var(--green)">+' + (lr.new || 0) + '</b>　' +
+        '本轮未出现：<b style="color:var(--yellow)">' + (lr.missing || 0) + '</b>　' +
+        'JD变更：' + (lr.changed || 0) + '</div>' +
+        '<div>全局累计：<b>' + (lr.total || 0) + '</b> 条（跨任务去重）</div>' +
+        errLine + running +
+        '<div style="color:var(--dim);font-size:12px;margin-top:8px">下一轮：' + nextTxt + ' 后</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
+        '<button class="btn-mini" onclick="this.closest(\'div[style*=inset]\').remove();openMonitorPanel(\'' +
+          monEsc(m.monitor_id) + '\')">查看面板</button>' +
+        '<button class="btn-mini green" onclick="this.closest(\'div[style*=inset]\').remove()">知道了</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(head);
+  setTimeout(function() { if (head.parentNode) head.remove(); }, 20000);
+}
+
+// ── 监控面板 ──
+function openMonitorPanel(mid) {
+  currentMonitorId = mid;
+  document.getElementById('monitorView').style.display = 'block';
+  renderMonitorPanel(mid);
+  if (monitorPanelTimer) clearInterval(monitorPanelTimer);
+  monitorPanelTimer = setInterval(function() {
+    if (document.getElementById('monitorView').style.display === 'none') {
+      clearInterval(monitorPanelTimer); monitorPanelTimer = null; return;
+    }
+    renderMonitorPanel(currentMonitorId);
+  }, 15000);
+}
+
+function closeMonitorView() {
+  document.getElementById('monitorView').style.display = 'none';
+  currentMonitorId = null;
+  if (monitorPanelTimer) { clearInterval(monitorPanelTimer); monitorPanelTimer = null; }
+}
+
+function monCard(label, value, color, hint) {
+  return '<div class="stat-card" style="flex:1;min-width:130px">' +
+    '<div style="font-size:11px;color:var(--dim)">' + label + '</div>' +
+    '<div style="font-size:20px;font-weight:700;color:' + (color || 'var(--text)') + '">' + value + '</div>' +
+    (hint ? '<div style="font-size:10px;color:var(--dim);margin-top:2px">' + hint + '</div>' : '') +
+    '</div>';
+}
+
+function renderMonitorPanel(mid) {
+  if (!mid) return;
+  mapi('api/monitor' + '?id=' + encodeURIComponent(mid)).then(function(res) {
+    if (res.error) {
+      document.getElementById('mvBody').innerHTML =
+        '<div style="color:var(--red);padding:20px">' + monEsc(res.error) + '</div>';
+      return;
+    }
+    var m = res.monitor, rounds = res.rounds || [];
+    document.getElementById('mvTitle').textContent = '🛰️ ' + m.monitor_id;
+    var stIcon = {running:'🟢 运行中', paused:'🟡 已暂停', stopped:'⚪ 已终止',
+                  expired:'⏰ 已到期', blocked:'⛔ 阻塞'}[m.status] || m.status;
+    var stColor = m.status === 'running' ? 'var(--green)' :
+                  (m.status === 'paused' ? 'var(--yellow)' : 'var(--dim)');
+    var s = m.stats || {};
+    var html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">' +
+      monCard('状态', stIcon, stColor, m.login_stale ? '⚠️ 登录态待刷新' : '') +
+      monCard('下次执行', fmtLeft(m.next_run_in), 'var(--accent)',
+              m.next_run_at ? m.next_run_at.replace('T', ' ').slice(0,16) : '未排期') +
+      monCard('已爬轮次', (m.rounds || 0) + ' 轮', null,
+              '间隔 ' + m.interval_hours + 'h' + (m.duration_hours > 0 ? ' / 共 ' + m.duration_hours + 'h' : ' / 不限时长')) +
+      monCard('岗位总数', s.total_jobs || 0, 'var(--green)', '全局去重') +
+      monCard('累计新增', s.new_total || 0, 'var(--purple)',
+              '未出现 ' + (s.missing_total || 0) + ' / 变更 ' + (s.changed_total || 0)) +
+      monCard('失败轮次', s.failed_rounds || 0, (s.failed_rounds ? 'var(--red)' : null),
+              m.remaining_hours != null ? '剩余 ' + m.remaining_hours + ' 小时' : '') +
+      '</div>';
+
+    // 配置行
+    html += '<div class="stat-card" style="margin-bottom:14px;font-size:12px;line-height:2">' +
+      '<div>🔗 列表页：<span style="color:var(--dim);word-break:break-all">' + monEsc(m.list_url) + '</span></div>' +
+      '<div>⏱ 间隔 <b>' + m.interval_hours + '</b> 小时　·　🌙 夜间禁跑 <b>' +
+        monEsc((m.quiet_hours||[]).join(' – ')) + '</b>　·　🔑 登录刷新阈值 <b>' +
+        (m.login ? m.login.relogin_after_hours : 48) + '</b> 小时' +
+        (m.login && m.login.last_login_verified_at
+          ? '（上次验证 ' + m.login.last_login_verified_at.replace('T',' ').slice(0,16) + '）' : '（尚未验证）') +
+      '</div>' +
+      '<div>🎛 滚动参数：max_scroll <b>' + m.scroll.max_scroll + '</b> / max_jobs <b>' + m.scroll.max_jobs +
+        '</b> / 等待 <b>' + m.scroll.base_wait + 's</b> / 滚动间隔 <b>' + m.scroll.scroll_wait + 's</b>' +
+        ' / 距离 <b>' + m.scroll.scroll_delta + 'K</b></div>' +
+      (m.last_round && !m.last_round.ok
+        ? '<div style="color:var(--red)">❌ 上轮失败：' + monEsc(m.last_round.error || '') + '</div>' : '') +
+      '</div>';
+
+    // 操作按钮
+    var ops = [];
+    if (m.status !== 'running') ops.push('<button class="btn-mini green" onclick="monAct(\'resume\')">🟢 启动/恢复</button>');
+    if (m.status === 'running') ops.push('<button class="btn-mini" onclick="monAct(\'pause\')" style="background:var(--yellow);color:#000">🟡 暂停</button>');
+    ops.push('<button class="btn-mini cyan" onclick="monAct(\'run-now\')">⚡ 立即执行一轮</button>');
+    ops.push('<button class="btn-mini" onclick="monEditParams()">⚙️ 调整参数</button>');
+    ops.push('<button class="btn-mini" onclick="monAct(\'relogin\')">🔑 重新登录校验</button>');
+    if (m.status !== 'stopped') ops.push('<button class="btn-mini" onclick="monAct(\'stop\')" style="background:var(--red);color:#fff">⏹ 终止任务</button>');
+    ops.push('<button class="btn-mini" onclick="openFolderMonitor()">📂 打开目录</button>');
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">' + ops.join('') + '</div>';
+
+    // 轮次表
+    html += '<h3 style="font-size:14px;margin-bottom:8px">轮次历史（' + rounds.length + '）</h3>';
+    if (!rounds.length) {
+      html += '<div style="color:var(--dim);font-size:12px">还没有完成的轮次。' +
+              (m.status === 'running' ? '首轮正在进行中…' : '任务处于 ' + m.status + ' 状态，启动后才会执行。') + '</div>';
+    } else {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+        '<tr style="color:var(--dim);text-align:left">' +
+        '<th style="padding:6px">轮次</th><th>时间</th><th>抓到</th><th>新增</th>' +
+        '<th>未出现</th><th>疑似下架</th><th>JD变更</th><th>累计</th><th>状态</th><th></th></tr>';
+      rounds.forEach(function(r) {
+        html += '<tr style="border-top:1px solid var(--border)">' +
+          '<td style="padding:6px">#' + (r.round == null ? '-' : r.round) + '</td>' +
+          '<td>' + (r.at ? r.at.replace('T',' ').slice(0,16) : '-') + '</td>' +
+          '<td>' + (r.scraped == null ? '-' : r.scraped) + '</td>' +
+          '<td style="color:var(--green)">+' + (r.new || 0) + '</td>' +
+          '<td style="color:var(--yellow)">' + (r.missing || 0) + '</td>' +
+          '<td>' + (r.suspected || 0) + '</td>' +
+          '<td>' + (r.changed || 0) + '</td>' +
+          '<td>' + (r.total == null ? '-' : r.total) + '</td>' +
+          '<td style="color:' + (r.ok ? 'var(--green)' : 'var(--red)') + '">' +
+            (r.ok ? '✅' : '❌ ' + monEsc(r.error || '')) + '</td>' +
+          '<td><button class="btn-mini" onclick="monRound(\'' + monEsc(r.name) + '\')">明细</button></td>' +
+          '</tr>';
+      });
+      html += '</table>';
+    }
+    // 告警区
+    var als = (m.alerts || []).filter(function(a){ return !a.acked; });
+    if (als.length) {
+      html += '<h3 style="font-size:14px;margin:16px 0 8px">未处理告警</h3>';
+      als.slice(-10).reverse().forEach(function(a) {
+        var c = a.level === 'error' ? 'var(--red)' : (a.level === 'warn' ? 'var(--yellow)' : 'var(--dim)');
+        html += '<div style="font-size:12px;color:' + c + ';padding:4px 0">· [' +
+                a.at.replace('T',' ').slice(0,16) + '] ' + monEsc(a.message) + '</div>';
+      });
+    }
+    document.getElementById('mvBody').innerHTML = html;
+  });
+}
+
+function monAct(action) {
+  if (!currentMonitorId) return;
+  mapi('api/monitor/' + (action === 'run-now' ? 'run-now' : action), 'POST',
+       {id: currentMonitorId}).then(function(res) {
+    if (res.error) { toast('操作失败: ' + res.error, true); return; }
+    if (action === 'relogin') {
+      toast(res.ok ? '✅ 登录态已刷新：' + (res.msg || '通过') : '⚠️ 校验未通过：' + (res.msg || res.code), !res.ok);
+    } else if (action === 'run_now' || action === 'run-now') {
+      toast('⚡ 已触发一轮，稍后看面板');
+    } else if (res.status) {
+      toast('状态 → ' + res.status);
+    }
+    loadMonitors();
+    renderMonitorPanel(currentMonitorId);
+  });
+}
+
+function monEditParams() {
+  var m = null;
+  monitorsData.forEach(function(x) { if (x.monitor_id === currentMonitorId) m = x; });
+  if (!m) return;
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2200;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = '<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:520px;width:92%">' +
+    '<h3 style="font-size:15px;margin-bottom:14px">⚙️ 调整监控参数</h3>' +
+    '<div class="form-row">' +
+      '<div class="form-group"><label>间隔（小时）</label><input type="number" id="eInt" value="' + m.interval_hours + '" step="1" min="1"></div>' +
+      '<div class="form-group"><label>持续（小时，0=不限）</label><input type="number" id="eDur" value="' + m.duration_hours + '" step="1" min="0"></div>' +
+      '<div class="form-group"><label>登录阈值（小时）</label><input type="number" id="eRelogin" value="' + (m.login?m.login.relogin_after_hours:48) + '" step="1" min="1"></div>' +
+    '</div>' +
+    '<div class="form-row">' +
+      '<div class="form-group"><label>夜间开始</label><input type="text" id="eQs" value="' + monEsc((m.quiet_hours||['00:00'])[0]) + '" style="width:80px"></div>' +
+      '<div class="form-group"><label>夜间结束</label><input type="text" id="eQe" value="' + monEsc((m.quiet_hours||['','08:00'])[1]||'08:00') + '" style="width:80px"></div>' +
+      '<div class="form-group"><label>max_scroll</label><input type="number" id="eScroll" value="' + m.scroll.max_scroll + '" step="1" min="0"></div>' +
+      '<div class="form-group"><label>max_jobs</label><input type="number" id="eMaxJobs" value="' + m.scroll.max_jobs + '" step="1" min="0"></div>' +
+    '</div>' +
+    '<div style="font-size:11px;color:var(--dim);margin-bottom:12px">改间隔会重排下次执行时间（仍受夜间窗口约束）。</div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+      '<button class="btn-mini" onclick="this.closest(\'div[style*=inset]\').remove()">取消</button>' +
+      '<button class="btn-mini green" onclick="monSaveParams(this)">保存</button>' +
+    '</div></div>';
+  document.body.appendChild(ov);
+}
+
+function monSaveParams(btn) {
+  var body = {
+    id: currentMonitorId,
+    interval_hours: parseFloat(document.getElementById('eInt').value),
+    duration_hours: parseFloat(document.getElementById('eDur').value),
+    relogin_after_hours: parseFloat(document.getElementById('eRelogin').value),
+    quiet_hours: [document.getElementById('eQs').value.trim(), document.getElementById('eQe').value.trim()],
+    scroll: { max_scroll: parseInt(document.getElementById('eScroll').value),
+              max_jobs: parseInt(document.getElementById('eMaxJobs').value) }
+  };
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  mapi('api/monitor/update', 'POST', body).then(function(res) {
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+    if (res.error) { toast('保存失败: ' + res.error, true); return; }
+    toast('✅ 参数已更新');
+    var ov = btn ? btn.closest('div[style*=inset]') : null;
+    if (ov) ov.remove();
+    loadMonitors();
+    renderMonitorPanel(currentMonitorId);
+  });
+}
+
+function monRound(name) {
+  if (!currentMonitorId) return;
+  mapi('api/monitor/round?id=' + encodeURIComponent(currentMonitorId) +
+       '&round=' + encodeURIComponent(name)).then(function(res) {
+    var rv = document.getElementById('roundView');
+    var rb = document.getElementById('rvBody');
+    if (!rv || !rb) return;
+    if (res.error) { rb.innerHTML = '<div style="color:var(--red)">' + monEsc(res.error) + '</div>'; }
+    else {
+      var d = res.diff || {};
+      var rt = document.getElementById('rvTitle');
+      if (rt) rt.textContent = '🛰️ 第 ' + (res.round == null ? '?' : res.round) + ' 轮明细 · ' +
+                               monEsc(currentMonitorId) + ' · ' +
+                               (res.at ? res.at.replace('T', ' ').slice(0, 16) : '');
+      function list(arr, color) {
+        if (!arr || !arr.length) return '<div style="color:var(--dim);font-size:12px">无</div>';
+        return arr.slice(0, 80).map(function(x) {
+          var extra = x.salary ? ' <span style="color:var(--p-mid)">' + monEsc(x.salary) + '</span>' : '';
+          var comp = x.company ? ' <span style="color:var(--dim)">' + monEsc(x.company) + '</span>' : '';
+          var link = x.url ? '<a href="' + monEsc(x.url) + '" target="_blank" style="color:var(--accent);text-decoration:none;font-size:11px">↗</a> ' : '';
+          var tag = (x.suspected_delisted ? ' <span style="color:var(--orange);font-size:10px">疑似下架</span>' : '');
+          return '<div style="padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">' +
+                 link + '<span style="color:' + color + '">' + monEsc(x.title || x.job_id) + '</span>' +
+                 comp + extra + tag + '</div>';
+        }).join('') + (arr.length > 80 ? '<div style="color:var(--dim);font-size:11px;margin-top:6px">…共 ' + arr.length + ' 条，仅显示前 80</div>' : '');
+      }
+      rb.innerHTML = '<div style="font-size:12px;color:var(--dim);margin-bottom:12px">' +
+          '第 ' + (res.round || '-') + ' 轮　' + (res.at || '').replace('T',' ').slice(0,16) +
+          '　抓到 ' + (d.scraped || 0) + ' 条</div>' +
+        (res.error ? '<div style="color:var(--red);margin-bottom:12px">❌ ' + monEsc(res.error) + '</div>' : '') +
+        '<h4 style="font-size:13px;color:var(--green);margin-bottom:6px">🆕 新增（' + ((d.new||[]).length) + '）</h4>' + list(d.new, 'var(--green)') +
+        '<h4 style="font-size:13px;color:var(--yellow);margin:14px 0 6px">🚫 本轮未出现（' + ((d.missing||[]).length) + '）</h4>' +
+        '<div style="font-size:11px;color:var(--dim);margin-bottom:6px">列表页有翻页与排序波动，未出现 ≠ 已下架；连续 2 轮未出现才标「疑似下架」。</div>' +
+        list(d.missing, 'var(--yellow)') +
+        '<h4 style="font-size:13px;color:var(--accent);margin:14px 0 6px">✏️ JD 内容变更（' + ((d.changed||[]).length) + '）</h4>' + list(d.changed, 'var(--accent)') +
+        '<h4 style="font-size:13px;color:var(--purple);margin:14px 0 6px">🔄 重新出现（' + ((d.reappeared||[]).length) + '）</h4>' + list(d.reappeared, 'var(--purple)');
+    }
+    rv.style.display = 'block';
+  });
+}
+
+function closeRoundView() {
+  var rv = document.getElementById('roundView');
+  if (rv) rv.style.display = 'none';
+}
+
+function openFolderMonitor() {
+  if (!currentMonitorId) return;
+  mapi('api/monitor/folder', 'POST', {id: currentMonitorId}).then(function(res) {
+    if (res && res.ok) toast('📂 已在 Finder 打开任务目录');
+    else toast('打开目录失败: ' + ((res && res.error) || '未知'), true);
+  });
+}
+
+// 倒计时：每秒只更新文案，不重画整块
+function tickMonitorCountdown() {
+  if (!monitorAvail || !monitorsData.length) return;
+  monitorsData.forEach(function(m) {
+    if (m.status === 'running' && m.next_run_in != null) m.next_run_in -= 1;
+  });
+}
+
+async function loadMonitorsAsync() { await loadMonitors(); }
+
 </script>
 
 <!-- 新手使用说明 -->

@@ -1030,6 +1030,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return self._mon_action(data, 'relogin')
         if path in ('api/monitor/pause', 'api/monitor/resume', 'api/monitor/stop'):
             return self._mon_action(data, path.split('/')[-1])
+        if path == 'api/monitor/folder':
+            return self._mon_folder(data)
 
         # /navigate → CDP 跳转
         if path == 'navigate':
@@ -2081,6 +2083,23 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f'[monitor] 首轮触发失败（将由调度线程重试）: {e}')
         return self._json_response({'ok': True, 'monitor': monitor_task_public(task)})
+
+    def _mon_folder(self, data):
+        """在 Finder 里打开监控任务目录。"""
+        if not self._mon_store_ok():
+            return self._mon_err('长期监控未启用', 503)
+        mid = data.get('id')
+        if not mid:
+            return self._mon_err('缺少 id')
+        d = monitor_store.monitor_dir(mid)
+        if not os.path.isdir(d):
+            return self._mon_err('任务目录不存在', 404)
+        try:
+            target = os.path.join(d, 'monitor.json')
+            subprocess.run(['open', '-R', target if os.path.exists(target) else d], timeout=5)
+            return self._json_response({'ok': True, 'path': d})
+        except Exception as e:
+            return self._mon_err(f'打开失败: {e}', 500)
 
     def _mon_action(self, data, action: str):
         if monitor_scheduler is None:

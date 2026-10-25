@@ -197,8 +197,23 @@ class MonitorStore:
         label = (params.get('label') or '').strip() or f'{date_str}-{query or "监控"}'
         mid = self._unique_id(label if label.startswith(PREFIX) else f'{PREFIX}{label}')
 
-        interval = float(params.get('interval_hours') or DEFAULT_INTERVAL_HOURS)
-        duration = float(params.get('duration_hours') or DEFAULT_DURATION_HOURS)
+        # 数值参数：必须区分「没传」与「传了 0」。
+        # 旧写法 params.get('duration_hours') or DEFAULT 会把 0（=不限时长）当成缺省→ 48h。
+        def _num(key, default, minv=None):
+            raw = params.get(key)
+            if raw is None or raw == '':
+                return float(default)
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                return float(default)
+            if minv is not None:
+                v = max(float(minv), v)
+            return v
+
+        interval = _num('interval_hours', DEFAULT_INTERVAL_HOURS, 1)
+        duration = _num('duration_hours', DEFAULT_DURATION_HOURS, 0)
+        relogin_after = _num('relogin_after_hours', DEFAULT_RELOGIN_AFTER_HOURS, 1)
         quiet = params.get('quiet_hours') or list(DEFAULT_QUIET_HOURS)
         scroll = dict(DEFAULT_SCROLL)
         for k in SCROLL_KEYS:
@@ -226,8 +241,7 @@ class MonitorStore:
             'quiet_hours': quiet,
             'scroll': scroll,
             'login': {
-                'relogin_after_hours': float(params.get('relogin_after_hours')
-                                             or DEFAULT_RELOGIN_AFTER_HOURS),
+                'relogin_after_hours': relogin_after,
                 'last_login_verified_at': None,
                 'stale': False,
             },
@@ -503,6 +517,18 @@ if __name__ == '__main__':
             pv = task_public(st.load(mid))
             assert pv['next_run_in'] is not None and 'login_stale' in pv
             print('store+diff OK')
+
+            # 不限时长（duration_hours=0）→ end_at 必须为 None
+            mid0, t0 = st.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=不限',
+                                  'duration_hours': 0})
+            assert t0['end_at'] is None, t0['end_at']
+            assert t0['duration_hours'] == 0, t0['duration_hours']
+            # 间隔非法值 clamp 到 >=1
+            midbad, tb = st.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=零',
+                                    'interval_hours': 0})
+            assert tb['interval_hours'] == 1, tb['interval_hours']
+            print('defaults OK')
+
         print('monitor_state self-test PASS')
         sys.exit(0)
     print('用法: python3 monitor_state.py --self-test')
