@@ -2311,7 +2311,7 @@ function loadMonitors() {
       head.value = '';
       head.textContent = monitorAvail
         ? '🛰️ 长期监控任务（' + monitorsData.length + '）'
-        : '🛰️ 监控模块未启用';
+        : '🛰️ ' + ((res && res.error) ? res.error : '监控模块未启用');
       sel.appendChild(head);
       monitorsData.forEach(function(m) {
         var o = document.createElement('option');
@@ -2331,8 +2331,12 @@ function loadMonitors() {
     }
     checkRoundReports(res && res.active_round);
   }).catch(function(e) {
+    // 接口偶发失败不得把下拉写成死掉的「不可用」：保留已有选项 + 等 20s 轮询自愈
+    console.error('[monitors] 加载失败', e);
     var sel = document.getElementById('monitorSelect');
-    if (sel && sel.options.length <= 1) sel.innerHTML = '<option value="">🛰️ 监控接口不可用</option>';
+    if (sel && sel.options.length <= 1) {
+      sel.innerHTML = '<option value="">🛰️ 监控接口暂时异常（20 秒后自动重试）</option>';
+    }
   });
 }
 

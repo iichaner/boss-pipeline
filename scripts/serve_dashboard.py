@@ -529,6 +529,34 @@ def init_monitoring(history_root: str, enable: bool = True):
         return None
 
 
+def _public_active(a):
+    """调度器内存态 active 轮次 → JSON 安全结构。
+
+    active 里的 started_at / deadline 是 datetime 对象，直接塞进 JSON 会抛
+    TypeError 让 /api/monitors 整条 500（2026-10-26 回归：轮次一跑起来页面就显示
+    「监控接口不可用」），这里统一转 ISO 字符串。
+    """
+    if not a:
+        return None
+
+    def _iso(v):
+        if v is None or isinstance(v, str):
+            return v
+        try:
+            return v.isoformat(timespec='seconds')
+        except Exception:
+            return str(v)
+
+    return {
+        'monitor_id': a.get('monitor_id'),
+        'round_no': a.get('round_no'),
+        'round_name': a.get('round_name'),
+        'pid': a.get('pid'),
+        'started_at': _iso(a.get('started_at')),
+        'deadline': _iso(a.get('deadline')),
+    }
+
+
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     """自定义 HTTP Handler：静态文件 + JSON 代理 + CSV 查询。"""
 
@@ -1982,7 +2010,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return self._json_response(result)
 
     def _json_response(self, data, code=200):
-        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        try:
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        except TypeError as e:
+            # 兜底：混入 datetime 等不可序列化对象时降级为字符串，而不是整条响应断连
+            # （回归 2026-10-26：active_round 含 datetime → /api/monitors 无响应 → 前端下拉变「接口不可用」）
+            print(f"[serve_dashboard] ⚠️ JSON 序列化降级: {e}", file=sys.stderr, flush=True)
+            body = json.dumps(data, ensure_ascii=False, default=str).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -2067,7 +2101,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             'monitors': tasks,
             'alerts': alerts[-20:],
             'scheduler_running': monitor_scheduler is not None,
-            'active_round': (monitor_scheduler.active if monitor_scheduler else None),
+            'active_round': _public_active(monitor_scheduler.active if monitor_scheduler else None),
             'crawl_busy': bool(st.get('running')),
         })
 
@@ -2083,7 +2117,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return self._json_response({
             'monitor': monitor_task_public(t),
             'rounds': self._mon_round_summaries(mid),
-            'active_round': (monitor_scheduler.active if monitor_scheduler else None),
+            'active_round': _public_active(monitor_scheduler.active if monitor_scheduler else None),
         })
 
     def _mon_round_detail(self, qs):
