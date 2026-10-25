@@ -58,6 +58,17 @@ except Exception as e:
     JUDGE_MONITOR_AVAILABLE = False
     print(f"[serve_dashboard] judge_monitor 加载失败: {e}")
 
+# ── 长期监控任务模块（P0-2）───────────────────────────────
+try:
+    from monitor_state import MonitorStore, task_public as monitor_task_public
+    from monitor_scheduler import MonitorScheduler
+    MONITOR_MODULES_AVAILABLE = True
+except Exception as e:
+    MonitorStore = MonitorScheduler = None
+    monitor_task_public = None
+    MONITOR_MODULES_AVAILABLE = False
+    print(f"[serve_dashboard] 长期监控模块加载失败: {e}")
+
 
 class CrawlManager:
     """管理爬取/打招呼子进程。"""
@@ -466,6 +477,28 @@ class CrawlManager:
 # 全局实例
 crawl_manager = CrawlManager()
 
+# 长期监控全局实例（start_dashboard_server 里按 history_root 初始化）
+monitor_store = None
+monitor_scheduler = None
+
+
+def init_monitoring(history_root: str, enable: bool = True):
+    """创建监控任务存储并启动调度线程。history_root 缺失或显式关闭时不启用。"""
+    global monitor_store, monitor_scheduler
+    if not enable or not history_root or not MONITOR_MODULES_AVAILABLE:
+        return None
+    try:
+        monitor_store = MonitorStore(history_root)
+        monitor_scheduler = MonitorScheduler(monitor_store, crawl_manager)
+        monitor_scheduler.start()
+        print(f"📡 长期监控调度器已启动，任务根目录: {history_root}")
+        return monitor_scheduler
+    except Exception as e:
+        print(f"[serve_dashboard] 长期监控初始化失败: {e}")
+        monitor_store = None
+        monitor_scheduler = None
+        return None
+
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     """自定义 HTTP Handler：静态文件 + JSON 代理 + CSV 查询。"""
@@ -857,6 +890,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return self._json_response(judge_monitor.get_status())
             return self._json_response({'available': False, 'error': 'judge_monitor 未加载'})
 
+        # /api/monitors → 长期监控任务列表 + 全局未确认告警
+        if path == 'api/monitors':
+            return self._mon_list()
+
+        # /api/monitor → 单个监控任务详情（含轮次列表）
+        if path == 'api/monitor':
+            return self._mon_detail(qs)
+
+        # /api/monitor/round → 单轮完整差异
+        if path == 'api/monitor/round':
+            return self._mon_round_detail(qs)
+
         # / → index.html（no-cache 防浏览器缓存旧版）
         if path in ('', 'index.html'):
             return self._serve_file(os.path.join(DASHBOARD_DIR, 'index.html'), 'text/html', cache=False)
@@ -973,6 +1018,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         # /api/judge/full → 全量判定（所有未判定的 JD）
         if path == 'api/judge/full':
             return self._handle_judge(dir_, 'full')
+
+        # ── 长期监控任务 POST ──
+        if path == 'api/monitor/create':
+            return self._mon_create(data)
+        if path == 'api/monitor/update':
+            return self._mon_action(data, 'update')
+        if path == 'api/monitor/run-now':
+            return self._mon_action(data, 'run_now')
+        if path == 'api/monitor/relogin':
+            return self._mon_action(data, 'relogin')
+        if path in ('api/monitor/pause', 'api/monitor/resume', 'api/monitor/stop'):
+            return self._mon_action(data, path.split('/')[-1])
 
         # /navigate → CDP 跳转
         if path == 'navigate':
@@ -1893,6 +1950,158 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    # ══ 长期监控任务 API（P0-2）════════════════════════════
+    def _mon_err(self, msg, code=400):
+        return self._json_response({'error': msg}, code)
+
+    def _mon_store_ok(self):
+        return monitor_store is not None and monitor_task_public is not None
+
+    def _mon_round_summaries(self, mid: str, limit: int = 60) -> list:
+        """列出已完成轮次（读 summary.json），倒序。"""
+        out = []
+        rd = monitor_store.rounds_dir(mid)
+        if not os.path.isdir(rd):
+            return out
+        for name in sorted(os.listdir(rd), reverse=True):
+            sp = os.path.join(rd, name, 'summary.json')
+            if not os.path.isfile(sp):
+                continue
+            try:
+                with open(sp, 'r', encoding='utf-8') as f:
+                    s = json.load(f)
+            except Exception:
+                continue
+            d = s.get('diff') or {}
+            out.append({
+                'name': name,
+                'round': s.get('round'),
+                'at': s.get('at'),
+                'ok': s.get('ok'),
+                'error': s.get('error'),
+                'scraped': d.get('scraped'),
+                'new': len(d.get('new') or []),
+                'missing': len(d.get('missing') or []),
+                'suspected': d.get('suspected_delisted'),
+                'changed': len(d.get('changed') or []),
+                'reappeared': len(d.get('reappeared') or []),
+                'total': d.get('total_seen'),
+            })
+            if len(out) >= limit:
+                break
+        return out
+
+    def _mon_list(self):
+        if not self._mon_store_ok():
+            return self._json_response({'available': False, 'monitors': [], 'error': '长期监控未启用'}, 200)
+        tasks = [monitor_task_public(t) for t in monitor_store.list()]
+        alerts = []
+        for t in tasks:
+            for a in (t.get('alerts') or []):
+                if not a.get('acked'):
+                    item = dict(a)
+                    item['monitor_id'] = t.get('monitor_id')
+                    item['label'] = t.get('label')
+                    alerts.append(item)
+        alerts.sort(key=lambda a: a.get('at') or '')
+        st = crawl_manager.status() or {}
+        return self._json_response({
+            'available': True,
+            'monitors': tasks,
+            'alerts': alerts[-20:],
+            'scheduler_running': monitor_scheduler is not None,
+            'active_round': (monitor_scheduler.active if monitor_scheduler else None),
+            'crawl_busy': bool(st.get('running')),
+        })
+
+    def _mon_detail(self, qs):
+        if not self._mon_store_ok():
+            return self._mon_err('长期监控未启用', 503)
+        mid = (qs.get('id') or [None])[0]
+        if not mid:
+            return self._mon_err('缺少 id')
+        t = monitor_store.load(mid)
+        if not t:
+            return self._mon_err('任务不存在', 404)
+        return self._json_response({
+            'monitor': monitor_task_public(t),
+            'rounds': self._mon_round_summaries(mid),
+            'active_round': (monitor_scheduler.active if monitor_scheduler else None),
+        })
+
+    def _mon_round_detail(self, qs):
+        """返回单轮完整差异（含新增/未出现岗位清单）。支持 round=latest。"""
+        if not self._mon_store_ok():
+            return self._mon_err('长期监控未启用', 503)
+        mid = (qs.get('id') or [None])[0]
+        name = (qs.get('round') or ['latest'])[0]
+        if not mid:
+            return self._mon_err('缺少 id')
+        if name == 'latest':
+            rd = monitor_store.rounds_dir(mid)
+            cands = [n for n in sorted(os.listdir(rd), reverse=True)
+                     if os.path.isfile(os.path.join(rd, n, 'summary.json'))] if os.path.isdir(rd) else []
+            if not cands:
+                return self._mon_err('还没有已完成的轮次', 404)
+            name = cands[0]
+        sp = os.path.join(monitor_store.rounds_dir(mid), name, 'summary.json')
+        if not os.path.isfile(sp):
+            return self._json_response({'error': '本轮无报告（可能正在进行或已被清理）'}, 404)
+        try:
+            with open(sp, 'r', encoding='utf-8') as f:
+                s = json.load(f)
+        except Exception as e:
+            return self._mon_err(f'读取失败: {e}', 500)
+        s['round_name'] = name
+        s['raw_dir'] = os.path.join(monitor_store.rounds_dir(mid), name, '01_raw')
+        return self._json_response(s)
+
+    def _mon_create(self, data):
+        if not self._mon_store_ok():
+            return self._mon_err('长期监控未启用', 503)
+        if not data.get('url'):
+            return self._mon_err('缺少列表页 URL')
+        params = {
+            'url': data.get('url', ''),
+            'label': data.get('label', ''),
+            'interval_hours': data.get('interval_hours'),
+            'duration_hours': data.get('duration_hours'),
+            'quiet_hours': data.get('quiet_hours'),
+            'relogin_after_hours': data.get('relogin_after_hours'),
+            'scroll': data.get('scroll') or {},
+            'start_paused': bool(data.get('start_paused')),
+        }
+        mid, task = monitor_store.create(params)
+        if not mid:
+            return self._mon_err((task or {}).get('error') or '创建失败')
+        # 创建即跑第一轮：立即尝试起一轮，不等 30s 调度拍（start_paused 则不触发）
+        if monitor_scheduler and task.get('status') == 'running':
+            try:
+                monitor_scheduler.run_now(mid)
+            except Exception as e:
+                print(f'[monitor] 首轮触发失败（将由调度线程重试）: {e}')
+        return self._json_response({'ok': True, 'monitor': monitor_task_public(task)})
+
+    def _mon_action(self, data, action: str):
+        if monitor_scheduler is None:
+            return self._mon_err('长期监控调度器未运行', 503)
+        mid = data.get('id')
+        if not mid:
+            return self._mon_err('缺少 id')
+        try:
+            if action == 'update':
+                return self._json_response(monitor_scheduler.update_params(mid, data))
+            if action == 'run_now':
+                return self._json_response(monitor_scheduler.run_now(mid))
+            if action == 'relogin':
+                return self._json_response(monitor_scheduler.mark_login_refreshed(mid))
+            status_map = {'pause': 'paused', 'resume': 'running', 'stop': 'stopped'}
+            if action in status_map:
+                return self._json_response(monitor_scheduler.set_status(mid, status_map[action]))
+        except Exception as e:
+            return self._mon_err(f'{action} 失败: {e}', 500)
+        return self._mon_err(f'未知动作: {action}')
+
     def log_message(self, format, *args):
         pass
 
@@ -1921,6 +2130,13 @@ def start_dashboard_server(output_dir: str, port: int = 8765, background: bool =
     """
     DashboardHandler.output_dir = os.path.abspath(output_dir)
     DashboardHandler.history_root = history_root or _derive_history_root(output_dir)
+
+    # 长期监控：按历史根目录建任务库并起调度线程（任务跨 session 常驻，
+    # 不依赖当前 output_dir 指向哪个 session）
+    try:
+        init_monitoring(DashboardHandler.history_root)
+    except Exception as e:
+        print(f"[serve_dashboard] 长期监控启动失败（不影响现有爬取）: {e}")
 
     server = http.server.HTTPServer(('127.0.0.1', port), DashboardHandler)
     server.allow_reuse_address = True

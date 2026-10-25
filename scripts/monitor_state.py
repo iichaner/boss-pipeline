@@ -209,12 +209,13 @@ class MonitorStore:
         created = now.isoformat(timespec='seconds')
         # duration_hours<=0 → 不限时长，直到人工停止
         end_at = (now + timedelta(hours=duration)).isoformat(timespec='seconds') if duration > 0 else None
+        start_paused = bool(params.get('start_paused'))
 
         task = {
             'monitor_id': mid,
             'label': mid,
             'list_url': url,
-            'status': 'running',          # running|paused|stopped|expired|blocked
+            'status': 'paused' if start_paused else 'running',          # running|paused|stopped|expired|blocked
             'kind': 'monitor',
             'created_at': created,
             'updated_at': created,
@@ -230,7 +231,7 @@ class MonitorStore:
                 'last_login_verified_at': None,
                 'stale': False,
             },
-            'next_run_at': now.isoformat(timespec='seconds'),   # 创建即跑第一轮
+            'next_run_at': None if start_paused else now.isoformat(timespec='seconds'),  # 创建即跑第一轮
             'rounds': 0,
             'last_round': None,
             'consecutive_failures': 0,
