@@ -78,17 +78,26 @@
   .right-panel { flex: 1; display: flex; overflow: hidden; }
   .job-list { width: 300px; min-width: 300px; overflow-y: auto; border-right: 1px solid var(--border); }
 
-  .job-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; position: relative; }
+  .job-item { display: flex; align-items: stretch; padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; position: relative; }
   .job-item:hover { background: var(--card); }
   .job-item.active { background: var(--card); border-left: 3px solid var(--accent); }
   .job-item.p-high { border-left: 3px solid var(--p-high); }
   .job-item.p-mid { border-left: 3px solid var(--p-mid); }
   .job-item.p-low { border-left: 3px solid var(--p-low); }
 
+  .job-item-inner { flex: 1; min-width: 0; }
   .job-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
   .job-item-title { font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .job-item-company { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
-  .job-item-meta { font-size: 11px; color: var(--dim); display: flex; gap: 8px; margin-bottom: 4px; }
+  .job-item-meta { font-size: 11px; color: var(--dim); display: flex; gap: 8px; }
+
+  /* 列表项右侧优先级按钮（纵向排列） */
+  .job-item-pri-btns { display: flex; flex-direction: column; gap: 3px; margin-left: 10px; justify-content: center; flex-shrink: 0; }
+  .btn-pri-col { width: 32px; height: 20px; font-size: 10px; font-weight: 500; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; background: transparent; color: var(--dim); transition: all 0.15s; display: flex; align-items: center; justify-content: center; }
+  .btn-pri-col:hover { opacity: 0.8; }
+  .btn-pri-col.active-high { background: var(--p-high); color: #fff; border-color: var(--p-high); }
+  .btn-pri-col.active-mid  { background: var(--p-mid);  color: #000; border-color: var(--p-mid); }
+  .btn-pri-col.active-low  { background: var(--p-low);  color: #fff; border-color: var(--p-low); }
 
   .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 500; }
   .badge.ok { background: rgba(34,197,94,0.15); color: var(--green); }
@@ -127,8 +136,28 @@
   .pri-tag.low { background: var(--p-low); color: #fff; }
   .pri-tag.none { background: var(--border); color: var(--dim); }
 
-  .pri-select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; }
-  .pri-select:focus { outline: none; border-color: var(--accent); }
+  /* 详情页横向优先级按钮组 */
+  .pri-btn-group { display: inline-flex; gap: 0; }
+  .pri-btn { padding: 4px 14px; font-size: 12px; font-weight: 500; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--dim); transition: all 0.15s; }
+  .pri-btn:first-child { border-radius: 5px 0 0 5px; }
+  .pri-btn:last-child  { border-radius: 0 5px 5px 0; }
+  .pri-btn:not(:first-child) { border-left: none; }
+  .pri-btn.low:hover  { color: var(--p-low); border-color: var(--p-low); }
+  .pri-btn.mid:hover  { color: var(--p-mid); border-color: var(--p-mid); }
+  .pri-btn.high:hover { color: var(--p-high); border-color: var(--p-high); }
+  .pri-btn.active-low  { background: var(--p-low);  color: #fff; border-color: var(--p-low); }
+  .pri-btn.active-mid  { background: var(--p-mid);  color: #000; border-color: var(--p-mid); }
+  .pri-btn.active-high { background: var(--p-high); color: #fff; border-color: var(--p-high); }
+
+  /* 人工备注输入行 */
+  .note-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .note-row .judge-k { flex-shrink: 0; }
+  .note-input-wrap { flex: 1; position: relative; display: flex; align-items: center; }
+  .note-input { width: 100%; padding: 4px 8px; padding-right: 48px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: 11px; outline: none; transition: border-color 0.15s; }
+  .note-input:focus { border-color: var(--accent); }
+  .note-save { position: absolute; right: 4px; padding: 2px 8px; font-size: 10px; background: var(--accent); color: #fff; border: none; border-radius: 3px; cursor: pointer; opacity: 0; transition: opacity 0.15s; pointer-events: none; }
+  .note-input-wrap:hover .note-save { opacity: 1; pointer-events: auto; }
+  .note-save.saved { background: var(--green); }
 
   #salaryChart { max-height: 200px; overflow-y: auto; }
   #locList { max-height: 200px; overflow-y: auto; }
@@ -399,11 +428,26 @@
       <div class="loc-list" id="locList" style="max-height:200px;overflow-y:auto"><div class="no-data">暂无数据</div></div>
     </div>
 
+    <!-- 创建空判定 CSV（供手动操作判定） -->
+    <div class="stat-card" style="margin-top:8px">
+      <button class="sidebar-btn" style="background:#06b6d4;color:#fff" onclick="createEmptyJudgment()">
+        📝 创建判定 CSV
+      </button>
+    </div>
+
     <!-- T5: 一键判定按钮 -->
     <div class="stat-card" style="margin-top:8px">
       <button class="sidebar-btn" style="background:var(--accent);color:#fff" onclick="invokeAgent()">
         🤖 一键判定（复制提示词到剪贴板）
       </button>
+    </div>
+
+    <!-- 全量判定按钮（本地引擎，零 Token 消耗） -->
+    <div class="stat-card" style="margin-top:8px">
+      <button class="sidebar-btn" style="background:var(--green);color:#fff" id="btnFullJudge" onclick="fullJudge()">
+        ⚡ 进行全量判定
+      </button>
+      <div id="judgeMonitorStatus" style="margin-top:6px;font-size:10px;color:var(--dim)"></div>
     </div>
 
     <!-- 判定结果导入 -->
@@ -1035,6 +1079,17 @@ function updatePriorityStats() {
   document.getElementById('priLow').textContent = l;
 }
 
+// === 创建空判定 CSV（供手动操作判定） ===
+async function createEmptyJudgment() {
+  const res = await api('api/create-empty-judgment');
+  if (res && res.ok) {
+    showToast('✅ 已创建空判定 CSV: ' + res.csv, 3000);
+    updateJudgeSource();
+  } else {
+    showToast('⚠️ 创建失败: ' + (res && res.error ? res.error : '未知'), true);
+  }
+}
+
 // === T5: 一键判定 ===
 async function invokeAgent() {
   // 优先使用后端完整提示词（含字段硬约束，避免合并出错）；失败则回退旧版简略提示词
@@ -1067,6 +1122,63 @@ async function invokeAgent() {
     showToast('✅ 提示词已复制！粘贴到 OpenClaw 即可', 3000);
   } catch(e) {
     prompt('复制以下提示词:', prompt);
+  }
+}
+
+// === 全量判定（本地引擎，零 Token 消耗） ===
+async function fullJudge() {
+  const btn = document.getElementById('btnFullJudge');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ 判定中...';
+  try {
+    const res = await api('api/judge/full', 'POST', {});
+    if (res && res.ok) {
+      const count = res.judged_count || 0;
+      const skipped = res.skipped_count || 0;
+      if (count > 0) {
+        showToast('✅ 全量判定完成: ' + count + ' 条已判定，' + skipped + ' 条跳过', 4000);
+      } else {
+        showToast('ℹ️ ' + (res.message || '无未判定的 JD'), 3000);
+      }
+      // 刷新列表和判定来源
+      pollJobs();
+      updateJudgeSource();
+    } else {
+      showToast('⚠️ 判定失败: ' + (res && res.error ? res.error : '未知'), true);
+    }
+  } catch(e) {
+    showToast('⚠️ 请求失败: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+// === 判定监控状态 ===
+async function refreshJudgeMonitorStatus() {
+  const el = document.getElementById('judgeMonitorStatus');
+  if (!el) return;
+  try {
+    const res = await api('api/judge/status');
+    if (!res) return;
+    if (!res.available) {
+      el.textContent = '⚠️ 引擎不可用';
+      el.style.color = 'var(--red)';
+      return;
+    }
+    if (res.monitor_running) {
+      el.textContent = '🟢 自动判定监控运行中';
+      el.style.color = 'var(--green)';
+    } else {
+      el.textContent = '⚪ 监控未启动（爬取时自动开启）';
+      el.style.color = 'var(--dim)';
+    }
+    if (res.total_judged > 0) {
+      el.textContent += ' | 已判定: ' + res.total_judged;
+    }
+  } catch(e) {
+    // 静默失败
   }
 }
 
@@ -1110,6 +1222,13 @@ function showCrawlModal(redo) {
     const now = new Date();
     const dateStr = now.toISOString().slice(0,10);
     nameInput.value = dateStr + '-';
+    // URL 变更时自动提取搜索文本更新任务名
+    urlInput.oninput = function() {
+      const u = urlInput.value.trim();
+      const qm = u.match(/query=([^&]+)/);
+      const q = qm ? decodeURIComponent(qm[1]).replace(/\s+/g, '') : '';
+      nameInput.value = q ? (dateStr + '-' + q) : (dateStr + '-');
+    };
     nameInput.placeholder = dateStr + '-搜索词';
   }
 }
@@ -1148,10 +1267,10 @@ async function startCrawl() {
 
   const now = new Date();
   const dateStr = now.toISOString().slice(0,10);
-  const timeStr = now.toTimeString().slice(0,8).replace(/:/g,'');
   const queryMatch = url.match(/query=([^&]+)/);
-  const query = queryMatch ? decodeURIComponent(queryMatch[1]).replace(/\s+/g, '') : '未知';
-  const sessionName = document.getElementById('crawlSessionName').value.trim() || (dateStr + '-' + query + '-' + timeStr);
+  const query = queryMatch ? decodeURIComponent(queryMatch[1]).replace(/\s+/g, '') : '';
+  const sessionName = document.getElementById('crawlSessionName').value.trim() || (dateStr + '-' + (query || '爬取'));
+  // 后端 _dedupe_session_name 会自动处理重名（追加 -2/-3）
 
   pendingCrawlParams = {
     url: url,
@@ -1310,7 +1429,8 @@ async function doStartCrawl(params) {
       pollProgress();
       pollJobs();
       updateJudgeSource();
-    updateGreetingSource();
+      updateGreetingSource();
+      refreshJudgeMonitorStatus();
     }
   } else {
     alert(result?.error || '启动失败');
@@ -1416,6 +1536,27 @@ async function setPriorityInline(jobId, level) {
   } else {
     showToast('⚠️ 优先级更新失败', 2500);
   }
+}
+
+// === 人工备注保存 ===
+let _noteTimers = {};
+function saveNoteDebounced(jobId, value) {
+  clearTimeout(_noteTimers[jobId]);
+  _noteTimers[jobId] = setTimeout(function() { saveNote(jobId, value); }, 500);
+}
+async function saveNote(jobId, value) {
+  try {
+  clearTimeout(_noteTimers[jobId]);
+  const data = await api('priority', 'POST', { job_id: jobId, note: value });
+  if (data && data.priorities) {
+    // 更新本地 allJobs
+    const job = allJobs.find(j => j.job_id === jobId);
+    if (job) job['judgment_note'] = value;
+    // 保存按钮反馈
+    const btn = document.querySelector('.note-save');
+    if (btn) { btn.classList.add('saved'); btn.textContent = '✓'; setTimeout(function() { btn.classList.remove('saved'); btn.textContent = '保存'; }, 1200); }
+  }
+  } catch(e) { console.error('saveNote error:', e); }
 }
 
 // === 消息按钮 ===
@@ -1640,21 +1781,24 @@ function renderJobList() {
     } else {
       badge = '<span class="badge ok">✓</span>';
     }
-    const priTag = jLvl
-      ? '<span class="pri-tag ' + ({高:'high',中:'mid',低:'low'}[jLvl]) + '">' + jLvl + '</span>'
-      : '<span class="pri-tag none">-</span>';
+    const priBtns = ['高','中','低'].map(function(lv) {
+      const cls = jLvl === lv ? ' active-' + ({高:'high',中:'mid',低:'low'}[lv]) : '';
+      return '<button class="btn-pri-col' + cls + '" onclick="event.stopPropagation();setPriorityInline(\'' + job.job_id + '\', \'' + lv + '\')" title="' + lv + '优先">' + lv + '</button>';
+    }).join('');
 
     return '<div class="job-item' + active + pClass + '" onclick="selectJob(\'' + job.job_id + '\', ' + idx + ')">' +
-      '<div class="job-title-row">' +
-        badge + '<span class="job-item-title">' + esc(job['职位名称'] || '未知') + '</span>' +
-        priTag +
-        greetDetailTag(job) +
+      '<div class="job-item-inner">' +
+        '<div class="job-title-row">' +
+          badge + '<span class="job-item-title">' + esc(job['职位名称'] || '未知') + '</span>' +
+          greetDetailTag(job) +
+        '</div>' +
+        '<div class="job-item-company">' + esc(job['公司名称'] || '') + '</div>' +
+        '<div class="job-item-meta">' +
+          '<span>' + esc(job['薪资'] || '面议') + '</span>' +
+          '<span>' + esc(job['区域'] || job['城市'] || '') + '</span>' +
+        '</div>' +
       '</div>' +
-      '<div class="job-item-company">' + esc(job['公司名称'] || '') + '</div>' +
-      '<div class="job-item-meta">' +
-        '<span>' + esc(job['薪资'] || '面议') + '</span>' +
-        '<span>' + esc(job['区域'] || job['城市'] || '') + '</span>' +
-      '</div>' +
+      '<div class="job-item-pri-btns">' + priBtns + '</div>' +
     '</div>';
   }).join('');
 }
@@ -1716,28 +1860,26 @@ function greetDetailTag(job) {
 // 判定信息卡片（匹配度直接显示；判断理由悬停 tooltip；长文本截断）
 function judgmentCardHtml(job) {
   const lvl = job['judgment_level'] || '';
-  if (!lvl) {
-    return '<div class="judge-card none">尚未进行优先级判定</div>';
-  }
-  const match = job['judgment_match'] || '-';
-  const reason = job['judgment_reason'] || '无';
+  const match = job['judgment_match'] || '';
+  const reason = job['judgment_reason'] || '';
   const scores = job['judgment_scores'] || '';
   const signals = job['judgment_signals'] || '';
-  const jdDepth = job['judgment_jd_depth'] || '-';
-  const candDepth = job['judgment_candidate_depth'] || '-';
+  const jdDepth = job['judgment_jd_depth'] || '';
+  const candDepth = job['judgment_candidate_depth'] || '';
   const lvlColor = {高:'high',中:'mid',低:'low'}[lvl];
 
   const manualMark = job['judgment_manual'] ? ' <span title="已手动修改">✏️</span>' : '';
-  const priOptions = ['高','中','低'].map(function(v){
-    return '<option value="'+v+'"'+(lvl===v?' selected':'')+'>'+v+'</option>';
+  const priBtns = ['低','中','高'].map(function(v) {
+    const cls = lvl === v ? ' active-' + ({高:'high',中:'mid',低:'low'}[v]) : '';
+    return '<button class="pri-btn ' + ({高:'high',中:'mid',低:'low'}[v]) + cls + '" onclick="setPriorityInline(\'' + job.job_id + '\', \'' + v + '\')">' + v + '</button>';
   }).join('');
-  const priSelect = `<select class="pri-select" onchange="setPriorityInline('${job.job_id}', this.value)">` + priOptions + '</select>' + manualMark;
+  const priBtnGroup = '<div class="pri-btn-group">' + priBtns + '</div>' + manualMark;
 
   let html = '<div class="judge-card">' +
     '<div class="judge-row">' +
-      '<span class="judge-k">优先级</span>' + priSelect +
+      '<span class="judge-k">优先级</span>' + priBtnGroup +
       '<span class="judge-k" style="margin-left:16px">匹配度</span>' +
-      '<span class="judge-v">' + esc(match) + (match && match !== '-' ? '%' : '') + '</span>' +
+      '<span class="judge-v">' + (match ? esc(match) + '%' : '-') + '</span>' +
     '</div>';
 
   if (scores) {
@@ -1747,13 +1889,26 @@ function judgmentCardHtml(job) {
     html += '<div class="judge-row"><span class="judge-k">叠加信号</span><span class="judge-v">' + esc(signals) + '</span></div>';
   }
   html += '<div class="judge-row">' +
-      '<span class="judge-k">平均JD深度</span><span class="judge-v">' + esc(jdDepth) + '</span>' +
-      '<span class="judge-k" style="margin-left:16px">候选人深度</span><span class="judge-v">' + esc(candDepth) + '</span>' +
+      '<span class="judge-k">平均JD深度</span><span class="judge-v">' + (jdDepth ? esc(jdDepth) : '-') + '</span>' +
+      '<span class="judge-k" style="margin-left:16px">候选人深度</span><span class="judge-v">' + (candDepth ? esc(candDepth) : '-') + '</span>' +
     '</div>';
 
   // 判断理由：截断显示，鼠标悬停（title）展示完整
   const shortReason = reason.length > 60 ? reason.slice(0, 60) + '…（悬停查看完整）' : reason;
   html += '<div class="judge-reason" title="' + esc(reason) + '">📝 判断理由：' + esc(shortReason) + '</div>';
+
+  // 人工备注
+  const noteVal = job['judgment_note'] || '';
+  html += '<div class="note-row">' +
+    '<span class="judge-k">📌 备注</span>' +
+    '<div class="note-input-wrap">' +
+      '<input class="note-input" type="text" value="' + esc(noteVal) + '" placeholder="修正理由、训练规则来源…" ' +
+        'onchange="saveNote(\'' + job.job_id + '\', this.value)" ' +
+        'oninput="saveNoteDebounced(\'' + job.job_id + '\', this.value)" />' +
+      '<button class="note-save" onclick="saveNote(\'' + job.job_id + '\', this.previousElementSibling.value)">保存</button>' +
+    '</div>' +
+  '</div>';
+
   html += '</div>';
   return html;
 }
@@ -1826,12 +1981,14 @@ if (window.location.protocol === 'file:') {
   pollCrawlStatus();
   pollGreetStatus();
   refreshEnvStatus();
+  refreshJudgeMonitorStatus();
   // 保存所有定时器ID，页面关闭时清理
   var allTimers = [];
   allTimers.push(setInterval(refreshEnvStatus, 15000));
   allTimers.push(setInterval(pollProgress, POLL_INTERVAL));
   allTimers.push(setInterval(pollJobs, JOBS_POLL));
   allTimers.push(setInterval(updateJudgeSource, 10000));
+  allTimers.push(setInterval(refreshJudgeMonitorStatus, 15000));
   allTimers.push(setInterval(pollCrawlStatus, 5000));
   pollTasks();
   allTimers.push(setInterval(pollTasks, 2000));

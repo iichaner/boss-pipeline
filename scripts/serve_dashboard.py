@@ -49,6 +49,15 @@ os.environ['no_proxy'] = os.environ['NO_PROXY']
 
 DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dashboard')
 
+# ── 优先级判定监控模块 ──────────────────────────────────────
+try:
+    from judge_monitor import judge_monitor
+    JUDGE_MONITOR_AVAILABLE = judge_monitor.available
+except Exception as e:
+    judge_monitor = None
+    JUDGE_MONITOR_AVAILABLE = False
+    print(f"[serve_dashboard] judge_monitor 加载失败: {e}")
+
 
 class CrawlManager:
     """管理爬取/打招呼子进程。"""
@@ -529,7 +538,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             pass
         # 按更新时间倒序
-        sessions.sort(key=lambda s: s.get('updatedAt', ''), reverse=True)
+        sessions.sort(key=lambda s: s.get('updatedAt', ''), reverse=False)
         return sessions
 
     def _stats_global(self):
@@ -815,6 +824,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == 'api/judgment-prompt':
             return self._judgment_prompt(dir_)
 
+        # /api/create-empty-judgment → 创建空判定 CSV（供手动操作判定）
+        if path == 'api/create-empty-judgment':
+            return self._create_empty_judgment(dir_)
+
         # /api/judgment-files → 列出可导入的判定 CSV
         if path == 'api/judgment-files':
             return self._judgment_files(dir_)
@@ -837,6 +850,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             path = os.path.join(self.GREETINGS_DIR, name)
             subprocess.run(['open', '-R', path], timeout=5)
             return self._json_response({'ok': True, 'path': path})
+
+        # /api/judge/status → 优先级判定监控状态
+        if path == 'api/judge/status':
+            if judge_monitor:
+                return self._json_response(judge_monitor.get_status())
+            return self._json_response({'available': False, 'error': 'judge_monitor 未加载'})
 
         # / → index.html（no-cache 防浏览器缓存旧版）
         if path in ('', 'index.html'):
@@ -909,10 +928,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     data['output_dir'] = os.path.join(DashboardHandler.history_root, session_name, '01_raw')
                 else:
                     data['output_dir'] = DashboardHandler.output_dir or ''
-            return self._json_response(crawl_manager.start_crawl(data))
+            result = crawl_manager.start_crawl(data)
+            # 启动判定监控（如果 matcher 可用）
+            if result.get('ok') and judge_monitor and judge_monitor.available:
+                output_dir = data.get('output_dir', '')
+                if output_dir:
+                    judge_monitor.start_monitor(output_dir)
+            return self._json_response(result)
 
         # /api/crawl/stop → 停止爬取
         if path == 'api/crawl/stop':
+            # 停止判定监控
+            if judge_monitor:
+                judge_monitor.stop_monitor()
             return self._json_response(crawl_manager.stop())
 
         # /api/crawl/skip-scroll → 跳过滚动，直接爬取
@@ -933,6 +961,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         # /api/import-judgment → 手动导入指定判定 CSV（持久化）
         if path == 'api/import-judgment':
             return self._import_judgment(dir_, data)
+
+        # /api/create-empty-judgment → 创建空判定 CSV（POST 入口）
+        if path == 'api/create-empty-judgment':
+            return self._create_empty_judgment(dir_)
+
+        # /api/judge/incremental → 增量判定（每 20 条）
+        if path == 'api/judge/incremental':
+            return self._handle_judge(dir_, 'incremental')
+
+        # /api/judge/full → 全量判定（所有未判定的 JD）
+        if path == 'api/judge/full':
+            return self._handle_judge(dir_, 'full')
 
         # /navigate → CDP 跳转
         if path == 'navigate':
@@ -971,25 +1011,56 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         job_id = data.get('job_id')
         level = data.get('level')
+        note = data.get('note')
+
+        # 更新优先级（支持 note 字段）
         if job_id and level in ('高', '中', '低'):
-            priorities[job_id] = level
+            existing = priorities.get(job_id)
+            old_note = ''
+            if isinstance(existing, dict):
+                old_note = existing.get('note', '')
+            priorities[job_id] = {'level': level, 'note': note if note is not None else old_note}
             tmp = pri_path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(priorities, f, ensure_ascii=False, indent=2)
             os.replace(tmp, pri_path)
-            # 同步写回判定 CSV（02_result 当前生效文件）
             self._sync_priority_to_csv(dir_, job_id, {'高': 'high', '中': 'medium', '低': 'low'}[level])
+        elif job_id and note is not None and not level:
+            # 仅更新备注（不改优先级）
+            existing = priorities.get(job_id)
+            if isinstance(existing, dict):
+                existing['note'] = note
+            elif isinstance(existing, str):
+                priorities[job_id] = {'level': existing, 'note': note}
+            else:
+                priorities[job_id] = {'level': '', 'note': note}
+            tmp = pri_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(priorities, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, pri_path)
+            self._sync_note_to_csv(dir_, job_id, note)
 
+        # 统一返回格式：兼容前端（前端同时处理 string 和 dict）
         return self._json_response({'priorities': priorities})
 
     def _sync_priority_to_csv(self, dir_: str, job_id: str, level_en: str):
-        """把手动优先级同步写回 02_result 当前生效判定 CSV 的 优先级判断 字段。"""
+        """把手动优先级同步写回 02_result 当前生效判定 CSV 的 优先级判断 字段。
+        若无判定 CSV 则自动创建空判定 CSV 再写入。"""
         try:
             _mapping, chosen = self._load_judgment_map(dir_)
         except Exception:
-            return
+            chosen = None
         if not chosen:
-            return
+            # 自动创建空判定 CSV
+            result = self._do_create_empty_judgment(dir_)
+            if not result or not result.get('ok'):
+                return
+            try:
+                _mapping, chosen = self._load_judgment_map(dir_)
+            except Exception:
+                return
+            if not chosen:
+                return
         result_dir = os.path.join(os.path.dirname(dir_), '02_result')
         csv_path = os.path.join(result_dir, chosen)
         if not os.path.isfile(csv_path):
@@ -1011,6 +1082,93 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 w.writerows(rows)
         except Exception:
             pass
+
+    def _sync_note_to_csv(self, dir_: str, job_id: str, note: str):
+        """把手动备注同步写回判定 CSV 的 人工备注 字段。"""
+        try:
+            _mapping, chosen = self._load_judgment_map(dir_)
+        except Exception:
+            chosen = None
+        if not chosen:
+            result = self._do_create_empty_judgment(dir_)
+            if not result or not result.get('ok'):
+                return
+            try:
+                _mapping, chosen = self._load_judgment_map(dir_)
+            except Exception:
+                return
+            if not chosen:
+                return
+        result_dir = os.path.join(os.path.dirname(dir_), '02_result')
+        csv_path = os.path.join(result_dir, chosen)
+        if not os.path.isfile(csv_path):
+            return
+        try:
+            rows = []
+            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                for row in reader:
+                    if row.get('job_id') == job_id:
+                        row['人工备注'] = note
+                    rows.append(row)
+            if '人工备注' not in fieldnames:
+                fieldnames.append('人工备注')
+            with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=fieldnames)
+                w.writeheader()
+                w.writerows(rows)
+        except Exception:
+            pass
+
+    def _do_create_empty_judgment(self, dir_: str) -> dict:
+        """创建空判定 CSV 核心逻辑（不发送 HTTP 响应）。返回 {ok, csv} 或 {error}。"""
+        result_dir = os.path.join(os.path.dirname(dir_), '02_result')
+        os.makedirs(result_dir, exist_ok=True)
+
+        # 找最新的 raw CSV
+        raws = glob_mod.glob(os.path.join(dir_, 'jobs_data*.csv'))
+        if not raws:
+            return {'error': '当前 session 无爬取数据（缺少 jobs_data*.csv）'}
+        raw_csv = max(raws, key=os.path.getmtime)
+
+        # 生成输出文件名：原文件名 + _判定结果-手动.csv
+        base_name = os.path.splitext(os.path.basename(raw_csv))[0]
+        out_name = base_name + '_判定结果-手动.csv'
+        out_path = os.path.join(result_dir, out_name)
+
+        # 读取 raw CSV，写入带空判定列的 CSV
+        try:
+            with open(raw_csv, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                for col in ('优先级判断', '匹配度', '优先级判断理由'):
+                    if col not in fieldnames:
+                        fieldnames.append(col)
+                with open(out_path, 'w', encoding='utf-8-sig', newline='') as f:
+                    w = csv.DictWriter(f, fieldnames=fieldnames)
+                    w.writeheader()
+                    for row in reader:
+                        for col in ('优先级判断', '匹配度', '优先级判断理由'):
+                            if col not in row:
+                                row[col] = ''
+                        w.writerow(row)
+        except Exception as e:
+            return {'error': f'创建失败: {e}'}
+
+        # 持久化为当前生效判定文件
+        src_path = os.path.join(dir_, 'judgment_source.json')
+        tmp = src_path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'csv': out_name}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, src_path)
+
+        self._auto_init_priorities(dir_)
+        return {'ok': True, 'csv': out_name}
+
+    def _create_empty_judgment(self, dir_: str):
+        """API 包装：创建空判定 CSV 并返回 HTTP 响应。"""
+        return self._json_response(self._do_create_empty_judgment(dir_))
 
     def _handle_navigate(self, data: dict):
         """通过 CDP 在浏览器中打开目标 URL。"""
@@ -1309,12 +1467,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         """合并 AI 判定(CSV) + 手动覆盖(priorities.json) 的优先级。"""
         mapping, _src = self._load_judgment_map(dir_)
         priorities = {jid: m['judgment_level'] for jid, m in mapping.items() if m.get('judgment_level')}
-        # 手动覆盖优先
+        notes = {jid: m.get('judgment_note', '') for jid, m in mapping.items() if m.get('judgment_note')}
+        # 手动覆盖优先（兼容旧格式 string 和新格式 dict）
         manual = self._read_json_raw(dir_, 'priorities.json') or {}
-        for jid, lv in manual.items():
-            if lv in ('高', '中', '低'):
-                priorities[jid] = lv
-        return self._json_response({'priorities': priorities})
+        for jid, val in manual.items():
+            if isinstance(val, dict):
+                lv = val.get('level', '')
+                if lv in ('高', '中', '低'):
+                    priorities[jid] = lv
+                if val.get('note'):
+                    notes[jid] = val['note']
+            elif isinstance(val, str) and val in ('高', '中', '低'):
+                priorities[jid] = val
+        return self._json_response({'priorities': priorities, 'notes': notes})
 
     def _greet_status(self, dir_: str):
         """读取 03_greet/greet_log.csv 返回打招呼进度。
@@ -1407,7 +1572,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if not mapping:
             return
 
-        priorities = {jid: m['judgment_level'] for jid, m in mapping.items() if m.get('judgment_level')}
+        priorities = {}
+        for jid, m in mapping.items():
+            lv = m.get('judgment_level', '')
+            note = m.get('judgment_note', '')
+            if lv or note:
+                priorities[jid] = {'level': lv, 'note': note}
         if priorities:
             tmp = pri_path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
@@ -1473,6 +1643,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                         'judgment_signals': (row.get('叠加信号') or '').strip(),
                         'judgment_jd_depth': (row.get('平均JD深度') or '').strip(),
                         'judgment_candidate_depth': (row.get('平均候选人深度') or '').strip(),
+                        'judgment_note': (row.get('人工备注') or '').strip(),
                     }
         except Exception:
             return {}, chosen
@@ -1496,15 +1667,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return self._json_response([])
         mapping, _src = self._load_judgment_map(dir_)
         manual = self._read_json_raw(dir_, 'priorities.json') or {}
-        if isinstance(manual, dict):
-            manual = {k: v for k, v in manual.items() if v in ('高', '中', '低')}
         if mapping and isinstance(data, list):
             for job in data:
                 jid = job.get('job_id')
                 if jid in mapping:
                     job.update(mapping[jid])
-                if jid in manual:
-                    job['judgment_level'] = manual[jid]
+                val = manual.get(jid)
+                if isinstance(val, dict):
+                    if val.get('level') in ('高', '中', '低'):
+                        job['judgment_level'] = val['level']
+                        job['judgment_manual'] = True
+                    if val.get('note'):
+                        job['judgment_note'] = val['note']
+                elif isinstance(val, str) and val in ('高', '中', '低'):
+                    job['judgment_level'] = val
                     job['judgment_manual'] = True
         return self._json_response(data)
 
@@ -1599,6 +1775,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self._auto_init_priorities(dir_)
         return self._json_response({'ok': True, 'csv': name})
 
+    def _handle_judge(self, dir_: str, mode: str):
+        """处理优先级判定请求（增量/全量）。"""
+        if not judge_monitor or not judge_monitor.available:
+            return self._json_response({
+                'ok': False,
+                'error': 'matcher 引擎不可用，请检查 job-match-priority 配置'
+            }, 500)
+
+        result = judge_monitor.judge_batch(dir_, mode=mode)
+        if result.get('ok'):
+            # 刷新 priorities.json 和判定来源
+            self._auto_init_priorities(dir_)
+        return self._json_response(result)
+
     def _start_greet(self, dir_: str, data: dict):
         """启动打招呼：合并 AI 判定(CSV) + 手动覆盖(priorities.json)，筛选高/中级。"""
         # 合并 AI 判定与手动覆盖（与 _serve_jobs_cache 一致）
@@ -1616,9 +1806,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 pass
         # 合并：AI 为基础，手动覆盖优先
         all_pri = {jid: m['judgment_level'] for jid, m in mapping.items() if m.get('judgment_level')}
-        for jid, lv in manual.items():
-            if lv in ('高', '中', '低'):
-                all_pri[jid] = lv
+        for jid, val in manual.items():
+            if isinstance(val, dict):
+                lv = val.get('level', '')
+                if lv in ('高', '中', '低'):
+                    all_pri[jid] = lv
+            elif isinstance(val, str) and val in ('高', '中', '低'):
+                all_pri[jid] = val
 
         high_mid_ids = [jid for jid, level in all_pri.items() if level in ('高', '中')]
         if not high_mid_ids:

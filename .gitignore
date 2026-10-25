@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时数据（爬取结果不纳入版本控制）
+*.csv
+progress.json
+jobs_cache.json
+priorities.json
+crawl_params.json
+pipeline.log
+*.log
+
+# 本地配置/密钥
+.env
+*.local
