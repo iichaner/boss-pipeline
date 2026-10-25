@@ -6,6 +6,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$HOME/.agents/skills/boss-pipeline"
 DASHBOARD_SCRIPT="$SKILL_DIR/scripts/serve_dashboard.py"
 
+# launchd 常驻服务优先：8765 已活着就直接开浏览器，不再起第二个服务
+# （两个服务共用同一历史根目录会出现两个监控调度线程抢同一批任务 = 重复爬 = 风控风险；
+#   代码层已加 flock 兜底，这里是把双击体验也对齐）
+if lsof -nP -i :8765 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "▶ 检测到常驻服务已在 8765 运行（launchd），直接打开浏览器"
+  open "http://localhost:8765"
+  exit 0
+fi
+
 # 找可用端口（8765-8775）
 PORT=8765
 for p in $(seq 8765 8775); do

@@ -480,6 +480,32 @@ crawl_manager = CrawlManager()
 # 长期监控全局实例（start_dashboard_server 里按 history_root 初始化）
 monitor_store = None
 monitor_scheduler = None
+_monitor_lock_fd = None      # 持有 flock 的 fd，进程退出自动释放
+
+
+def _acquire_scheduler_lock(history_root: str):
+    """同一 history_root 只允许一个进程跑调度线程。
+
+    场景：launchd 常驻服务占 8765，用户又双击 .command 起了 8766——
+    两个服务共用历史根目录，会出现两个调度线程抓同一批任务（重复爬 = 风控风险）。
+    拿不到锁的实例照常提供 HTTP 页面，但不启调度，/api/monitors 里 scheduler_running=false。
+    """
+    global _monitor_lock_fd
+    import fcntl
+    lock_path = os.path.join(history_root, '.monitor_scheduler.lock')
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, ('%d\n' % os.getpid()).encode())
+        os.fsync(fd)
+    except Exception:
+        pass
+    _monitor_lock_fd = fd   # 必须长期持有，不能关闭
+    return lock_path
 
 
 def init_monitoring(history_root: str, enable: bool = True):
@@ -489,6 +515,9 @@ def init_monitoring(history_root: str, enable: bool = True):
         return None
     try:
         monitor_store = MonitorStore(history_root)
+        if _acquire_scheduler_lock(history_root) is None:
+            print(f"⚠️ 已有另一个服务持有监控调度锁，本实例只提供页面、不跑调度: {history_root}")
+            return None
         monitor_scheduler = MonitorScheduler(monitor_store, crawl_manager)
         monitor_scheduler.start()
         print(f"📡 长期监控调度器已启动，任务根目录: {history_root}")
