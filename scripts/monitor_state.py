@@ -41,7 +41,12 @@ DEFAULT_RELOGIN_AFTER_HOURS = 48
 DEFAULT_MAX_FAILURES = 3
 DEFAULT_RETRY_MINUTES = 20
 DEFAULT_ROUND_TIMEOUT_MINUTES = 180
-KEEP_ROUNDS_DETAIL = 20          # 保留最近多少轮的原始明细，更早的只留 summary
+KEEP_ROUNDS_DETAIL = 50          # 保留最近多少轮的原始明细，更早的只留 summary（P2：20→50）
+VOLUME_FLOOR_RATIO = 0.6         # 本轮列表规模 < 上轮 × 该比例 → 判「抓取量异常」无效轮（P0）
+VOLUME_FLOOR_ABS = 5             # 绝对下限：连 5 条都不到一律无效（首轮/无基线也适用）
+DETAIL_SAMPLE_PER_ROUND = 12      # 每轮抽样重抓详情的条数，其余已知岗位跳过详情（分层抓取）
+PRESEED_CSV = 'jobs_data_preseed.csv'   # 预置 CSV：让爬虫按续爬逻辑跳过这些 job_id 的详情页
+PRESEED_JSON = '_preseed.json'
 
 SCROLL_KEYS = tuple(DEFAULT_SCROLL.keys())
 
@@ -250,8 +255,9 @@ class MonitorStore:
             'last_round': None,
             'consecutive_failures': 0,
             'guard_fail_streak': 0,
-            'stats': {'total_jobs': 0, 'new_total': 0, 'missing_total': 0,
-                      'changed_total': 0, 'failed_rounds': 0},
+            'volume_fail_streak': 0,
+            'stats': {'total_jobs': 0, 'last_scraped': 0, 'new_total': 0, 'missing_total': 0,
+                      'changed_total': 0, 'reposted_total': 0, 'failed_rounds': 0},
             'alerts': [],
             'active_round': None,
         }
@@ -346,6 +352,11 @@ def read_round_jobs(raw_dir: str) -> list:
                     'area': j.get('区域') or '',
                     'url': j.get('job_url') or '',
                     'desc': j.get('职位描述') or '',
+                    'city': j.get('城市') or '',
+                    'exp': j.get('经验要求') or '',
+                    'edu': j.get('学历要求') or '',
+                    'security_id': j.get('security_id') or '',
+                    'created': j.get('创建日期') or '',
                 })
         return jobs
     for fp in sorted(glob_mod.glob(os.path.join(raw_dir, '*.csv'))):
@@ -363,6 +374,11 @@ def read_round_jobs(raw_dir: str) -> list:
                         'area': row.get('区域') or '',
                         'url': row.get('岗位链接') or row.get('job_url') or '',
                         'desc': row.get('职位描述') or '',
+                        'city': row.get('城市') or '',
+                        'exp': row.get('经验要求') or '',
+                        'edu': row.get('学历要求') or '',
+                        'security_id': row.get('security_id') or '',
+                        'created': row.get('创建日期') or '',
                     })
         except Exception:
             continue
@@ -375,21 +391,44 @@ def _jd_fingerprint(job: dict) -> str:
     return hashlib.md5(src.encode('utf-8', 'ignore')).hexdigest()[:12]
 
 
+def _job_key(rec: dict) -> str:
+    """重发识别指纹：公司+标题+区域（去空白/小写）。
+
+    岗位重新发布时 Boss 会换 job_id，但公司/标题/区域通常不变；
+    靠这个指纹把「转世重发」识别出来，避免每次都算成 1 新增 + 1 未出现。
+    """
+    parts = []
+    for k in ('company', 'title', 'area'):
+        parts.append(''.join((rec.get(k) or '').split()).lower())
+    return '|'.join(parts)
+
+
 def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
     """把本轮结果并入跨轮主表，算出差异。
 
-    返回：{scraped, new[], missing[], reappeared[], changed[], absent_streak_over}
+    返回：{scraped, new[], missing[], reappeared[], changed[], reposted[], suspected_delisted, total_seen}
     - new        : 历史从未出现过的 job_id
     - missing    : 本轮未出现（不等于下架，列表页有翻页/排序波动）
     - suspected  : 连续 ≥2 轮未出现的 missing，才标注「疑似下架」
     - reappeared : 之前 missing、本轮又出现的
     - changed    : 同一 job_id 的 JD 指纹变化（薪资/描述/标题被改写）
+    - reposted   : job_id 是新的，但「公司+标题+区域」与某条当前缺席记录一致
+                   → 判为同一岗位重发：不计入 new，旧 job_id 也不计入 missing
     """
     seen = read_json(seen_path, {}) or {}
-    this_ids = {j['job_id'] for j in jobs}
+    this_ids = {j['job_id'] for j in jobs if j.get('job_id')}
     prev_ids = set(seen.keys())
 
-    new, reappeared, changed = [], [], []
+    # 重发索引：指纹 → 未替代的 job_id 列表
+    fp_index = {}
+    for jid, rec in seen.items():
+        if rec.get('superseded_by'):
+            continue
+        key = _job_key(rec)
+        if rec.get('company') and rec.get('title') and '|' in key:
+            fp_index.setdefault(key, []).append(jid)
+
+    new, reappeared, changed, reposted = [], [], [], []
     for j in jobs:
         jid = j.get('job_id') or ''
         if not jid:
@@ -400,9 +439,33 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
         fp = _jd_fingerprint(j)
         rec = seen.get(jid)
         if rec is None:
+            key = _job_key({'company': company, 'title': title, 'area': j.get('area') or ''})
+            cand = [x for x in fp_index.get(key, [])
+                    if x not in this_ids and not seen[x].get('superseded_by')]
+            if cand and company and title:
+                old_id = cand[0]
+                seen[old_id]['superseded_by'] = jid
+                seen[jid] = {
+                    'title': title, 'company': company, 'salary': salary,
+                    'area': j.get('area') or '', 'city': j.get('city') or '',
+                    'url': j.get('url') or '', 'desc': (j.get('desc') or '')[:4000],
+                    'exp': j.get('exp') or '', 'edu': j.get('edu') or '',
+                    'security_id': j.get('security_id') or '', 'created': j.get('created') or '',
+                    'jd_fp': fp,
+                    'first_round': seen[old_id].get('first_round', round_no),
+                    'last_round': round_no, 'absent_streak': 0, 'repost_of': old_id,
+                }
+                reposted.append({'job_id': jid, 'title': title, 'company': company,
+                                 'salary': salary, 'area': j.get('area') or '',
+                                 'url': j.get('url') or '', 'repost_of': old_id})
+                continue
             seen[jid] = {
                 'title': title, 'company': company, 'salary': salary,
-                'area': j.get('area') or '', 'url': j.get('url') or '', 'jd_fp': fp,
+                'area': j.get('area') or '', 'city': j.get('city') or '',
+                'url': j.get('url') or '', 'desc': (j.get('desc') or '')[:4000],
+                'exp': j.get('exp') or '', 'edu': j.get('edu') or '',
+                'security_id': j.get('security_id') or '', 'created': j.get('created') or '',
+                'jd_fp': fp,
                 'first_round': round_no, 'last_round': round_no, 'absent_streak': 0,
             }
             new.append({'job_id': jid, 'title': title, 'company': company,
@@ -420,12 +483,20 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
                     'company': company or rec.get('company', ''),
                     'salary': salary or rec.get('salary', ''),
                     'area': j.get('area') or rec.get('area', ''),
+                    'city': j.get('city') or rec.get('city', ''),
                     'url': j.get('url') or rec.get('url', ''),
+                    'desc': (j.get('desc') or rec.get('desc') or '')[:4000],
+                    'exp': j.get('exp') or rec.get('exp', ''),
+                    'edu': j.get('edu') or rec.get('edu', ''),
+                    'security_id': j.get('security_id') or rec.get('security_id', ''),
+                    'created': j.get('created') or rec.get('created', ''),
                     'jd_fp': fp, 'last_round': round_no, 'absent_streak': 0})
 
     missing = []
     for jid in sorted(prev_ids - this_ids):
         rec = seen[jid]
+        if rec.get('superseded_by'):
+            continue   # 已被重发替代：既不算「未出现」，也不删历史
         rec['absent_streak'] = rec.get('absent_streak', 0) + 1
         missing.append({
             'job_id': jid, 'title': rec.get('title', ''), 'company': rec.get('company', ''),
@@ -442,9 +513,34 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
         'missing': missing,
         'reappeared': reappeared,
         'changed': changed,
+        'reposted': reposted,
         'suspected_delisted': sum(1 for m in missing if m['suspected_delisted']),
         'total_seen': len(seen),
     }
+
+
+def preseed_rows(seen: dict, exclude_ids=None) -> list:
+    """把「本轮不打算重抓详情」的已知岗位转成爬虫 CSV 行（分层抓取）。
+
+    写成 jobs_data_preseed.csv 后，爬虫 load_existing_job_ids() 会把这些 job_id
+    视为已抓而跳过详情页（每个详情约 20s），单轮从 1~2 小时压到 10 分钟内；
+    该 CSV 同时为「本轮详情查看」兜底（含上次抓到的 JD 文本）。
+    """
+    exclude_ids = set(exclude_ids or ())
+    rows = []
+    for jid, rec in (seen or {}).items():
+        if jid in exclude_ids or rec.get('superseded_by'):
+            continue
+        rows.append({
+            '职位名称': rec.get('title') or '', '薪资': rec.get('salary') or '',
+            '经验要求': rec.get('exp') or '', '学历要求': rec.get('edu') or '',
+            '公司名称': rec.get('company') or '', '城市': rec.get('city') or '',
+            '区域': rec.get('area') or '', 'job_id': jid,
+            'job_url': rec.get('url') or '', 'security_id': rec.get('security_id') or '',
+            '职位描述': rec.get('desc') or '', '创建日期': rec.get('created') or '',
+        })
+    rows.sort(key=lambda r: r['job_id'])
+    return rows
 
 
 # ── 前端视图 ───────────────────────────────────────────────

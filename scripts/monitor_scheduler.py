@@ -16,6 +16,7 @@
 import os
 import sys
 import json
+import csv
 import time
 import http.client
 import threading
@@ -27,8 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor_state import (  # noqa: E402
     MonitorStore, read_json, atomic_write_json, now_iso, parse_iso,
     in_quiet, next_allowed, compute_next_run, read_round_jobs, apply_round,
+    preseed_rows,
     DEFAULT_RETRY_MINUTES, DEFAULT_MAX_FAILURES, DEFAULT_ROUND_TIMEOUT_MINUTES,
     SCROLL_KEYS,
+    VOLUME_FLOOR_RATIO, VOLUME_FLOOR_ABS, DETAIL_SAMPLE_PER_ROUND,
+    PRESEED_CSV, PRESEED_JSON,
 )
 
 try:
@@ -334,6 +338,30 @@ class MonitorScheduler:
         rname = self.store.new_round_name(now)
         raw_dir = self.store.round_raw_dir(mid, rname)
 
+        # 分层抓取（P1）：把「本轮不重抓详情」的已知岗位预置成 CSV。
+        # 爬虫 load_existing_job_ids() 会把这些 job_id 视为已抓而跳过详情页
+        # （每条约 20s），单轮从 1~2 小时压到 10 分钟内；该 CSV 同时为详情查看兜底。
+        skipped_details = 0
+        try:
+            seen = read_json(self.store.seen_path(mid), {}) or {}
+            ids = sorted(k for k, r in seen.items() if not r.get('superseded_by'))
+            sample = set()
+            if len(ids) > DETAIL_SAMPLE_PER_ROUND:
+                start = (round_no * DETAIL_SAMPLE_PER_ROUND) % len(ids)
+                sample = {ids[(start + i) % len(ids)] for i in range(DETAIL_SAMPLE_PER_ROUND)}
+            rows = preseed_rows(seen, exclude_ids=sample)
+            if rows:
+                os.makedirs(raw_dir, exist_ok=True)
+                with open(os.path.join(raw_dir, PRESEED_CSV), 'w',
+                          newline='', encoding='utf-8-sig') as f:
+                    w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                    w.writeheader()
+                    w.writerows(rows)
+                atomic_write_json(os.path.join(raw_dir, PRESEED_JSON), rows)
+                skipped_details = len(rows)
+        except Exception as e:
+            self._log(mid, f'预置跳过明细失败（回退为全量重抓）：{e}')
+
         params = {'url': task['list_url'], 'output_dir': raw_dir,
                   'session_name': f'{mid}/rounds/{rname}', 'navigate': True}
         for k in SCROLL_KEYS:
@@ -355,7 +383,34 @@ class MonitorScheduler:
         task['active_round'] = {'round': round_no, 'name': rname, 'pid': res.get('pid'),
                                 'started_at': now.isoformat(timespec='seconds')}
         self.store.save(task)
-        self._log(mid, f'第 {round_no} 轮开始（pid={res.get("pid")}）→ {raw_dir}')
+        self._log(mid, f'第 {round_no} 轮开始（pid={res.get("pid")}，跳过详情 {skipped_details} 条）→ {raw_dir}')
+
+    def _collect_round_jobs(self, raw_dir: str) -> list:
+        """合并「预置跳过明细」记录与本轮实际抓到的记录，并回写 jobs_cache.json。
+
+        分层抓取时爬虫只把新抓的写进 cache，预置的岗位不在其中；
+        不合并就会把整轮误判成大面积「未出现」，抓取量闸门也会被误触发。
+        """
+        preseed = read_json(os.path.join(raw_dir, PRESEED_JSON), []) or []
+        if not isinstance(preseed, list) or not preseed:
+            return read_round_jobs(raw_dir)
+        fetched = read_json(os.path.join(raw_dir, 'jobs_cache.json'), []) or []
+        if not isinstance(fetched, list):
+            fetched = []
+        by_id = {}
+        for row in preseed:
+            jid = (row.get('job_id') or '').strip()
+            if jid:
+                by_id[jid] = row
+        for row in fetched:      # 本轮真抓到的优先（详情已更新）
+            jid = (row.get('job_id') or '').strip()
+            if jid:
+                by_id[jid] = row
+        try:
+            atomic_write_json(os.path.join(raw_dir, 'jobs_cache.json'), list(by_id.values()))
+        except Exception:
+            pass
+        return read_round_jobs(raw_dir)
 
     def _poll_active(self, now: datetime) -> bool:
         """返回 True 表示轮次已结束（成功/失败/超时），可以调度下一轮。"""
@@ -381,14 +436,25 @@ class MonitorScheduler:
         prog = read_json(os.path.join(a['raw_dir'], 'progress.json'), {}) or {}
         pstat = prog.get('status')
         scraped = int(prog.get('scraped') or 0)
-        if pstat == 'done' and scraped > 0:
+        if pstat == 'done':
+            # 分层抓取：本轮只重抓少数详情，必须先合并预置记录再算规模与差异
+            jobs = self._collect_round_jobs(a['raw_dir'])
+            got = len(jobs)
+            task = self.store.load(a['monitor_id']) or {}
+            base = int((task.get('stats') or {}).get('last_scraped') or 0)
+            floor = (max(VOLUME_FLOOR_ABS, int(round(base * VOLUME_FLOOR_RATIO)))
+                     if base else VOLUME_FLOOR_ABS)
+            if got < floor:
+                # P0 抓取量闸门：列表页没加载完整/被风控时，绝不把差异写进主表
+                self._finish_round(
+                    a, now, ok=False, reason='volume',
+                    error=(f'本轮抓取量异常：仅 {got} 条（下限 {floor}，上轮 {base or "无基线"} 条），'
+                           f'疑似列表页未加载完整或被风控拦截；本轮不计入差异'))
+                return True
             self._finish_round(a, now, ok=True)
             return True
         if pstat == 'error':
             err = prog.get('error') or '爬取进程报错退出'
-        elif pstat == 'done':
-            # 正常退出但 0 条：监控列表页不可能空，视为本轮异常
-            err = '本轮抓到 0 条：列表页疑似被风控/验证码拦截或搜索无结果'
         else:
             err = f'爬取进程中途死亡（progress 停在“{pstat or "未建立"}”，已抓 {scraped} 条）'
             tail = self._tail_of(os.path.join(os.path.dirname(a['raw_dir']), 'pipeline.log'))
@@ -407,7 +473,8 @@ class MonitorScheduler:
         lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
         return ' / '.join(lines[-2:])[-limit:] if lines else ''
 
-    def _finish_round(self, a: dict, now: datetime, ok: bool, error: str = None):
+    def _finish_round(self, a: dict, now: datetime, ok: bool, error: str = None,
+                     reason: str = None):
         mid, rname, round_no = a['monitor_id'], a['round_name'], a['round_no']
         task = self.store.load(mid)
         if not task:
@@ -418,35 +485,46 @@ class MonitorScheduler:
         summary_path = os.path.join(self.store.rounds_dir(mid), rname, 'summary.json')
 
         if ok:
-            jobs = read_round_jobs(raw_dir)
+            jobs = self._collect_round_jobs(raw_dir)
             diff = apply_round(self.store.seen_path(mid), round_no, jobs)
             s = task.setdefault('stats', {})
             s['total_jobs'] = diff['total_seen']
+            s['last_scraped'] = diff['scraped']
             s['new_total'] = s.get('new_total', 0) + len(diff['new'])
             s['missing_total'] = s.get('missing_total', 0) + len(diff['missing'])
             s['changed_total'] = s.get('changed_total', 0) + len(diff['changed'])
+            s['reposted_total'] = s.get('reposted_total', 0) + len(diff.get('reposted') or [])
             atomic_write_json(summary_path, {'round': round_no, 'at': now.isoformat(timespec='seconds'),
                                              'ok': True, 'diff': diff})
             task['last_report'] = {
                 'round': round_no, 'at': now.isoformat(timespec='seconds'),
                 'new': len(diff['new']), 'missing': len(diff['missing']),
                 'scraped': diff['scraped'], 'total': diff['total_seen'],
-                'changed': len(diff['changed']), 'error': None,
+                'changed': len(diff['changed']), 'reposted': len(diff.get('reposted') or []),
+                'error': None,
             }
+            task['volume_fail_streak'] = 0
             self._log(mid, f'第 {round_no} 轮完成：抓到 {diff["scraped"]} / 新增 {len(diff["new"])}'
-                           f' / 未出现 {len(diff["missing"])}')
+                           f' / 未出现 {len(diff["missing"])} / 重发 {len(diff.get("reposted") or [])}')
         else:
-            task.setdefault('stats', {})['failed_rounds'] = \
-                task['stats'].get('failed_rounds', 0) + 1
+            stats = task.setdefault('stats', {})
+            stats['failed_rounds'] = stats.get('failed_rounds', 0) + 1
+            if reason == 'volume':
+                task['volume_fail_streak'] = task.get('volume_fail_streak', 0) + 1
+                self.store.append_alert(
+                    task, 'error' if task['volume_fail_streak'] >= 2 else 'warn',
+                    'volume_collapse', error or '抓取量异常')
+            else:
+                task['volume_fail_streak'] = 0
+                self.store.append_alert(task, 'warn', 'round_failed',
+                                        error or '本轮失败')
             atomic_write_json(summary_path, {'round': round_no,
                                              'at': now.isoformat(timespec='seconds'),
-                                             'ok': False, 'error': error})
+                                             'ok': False, 'error': error, 'reason': reason})
             task['last_report'] = {'round': round_no, 'at': now.isoformat(timespec='seconds'),
                                    'new': 0, 'missing': 0, 'scraped': 0,
                                    'total': task.get('stats', {}).get('total_jobs', 0),
-                                   'changed': 0, 'error': error}
-            self.store.append_alert(task, 'warn', 'round_failed',
-                                    error or '本轮失败')
+                                   'changed': 0, 'reposted': 0, 'error': error}
             self._log(mid, f'第 {round_no} 轮失败：{error}')
 
         task['rounds'] = round_no
@@ -455,12 +533,23 @@ class MonitorScheduler:
         task['active_round'] = None
         task['consecutive_failures'] = 0 if ok else task.get('consecutive_failures', 0) + 1
 
-        if task['consecutive_failures'] >= int(task.get('max_failures') or DEFAULT_MAX_FAILURES):
+        if (not ok) and reason == 'volume' and int(task.get('volume_fail_streak') or 0) >= 2:
+            task['status'] = 'paused'
+            task['next_run_at'] = None
+            self.store.append_alert(task, 'error', 'auto_paused',
+                                    '连续 2 轮抓取量异常，已自动暂停：请确认列表页能正常加载后再恢复')
+            self._log(mid, '连续 2 轮抓取量异常，自动暂停')
+        elif task['consecutive_failures'] >= int(task.get('max_failures') or DEFAULT_MAX_FAILURES):
             task['status'] = 'paused'
             task['next_run_at'] = None
             self.store.append_alert(task, 'error', 'auto_paused',
                                     f'连续 {task["consecutive_failures"]} 轮失败，已自动暂停')
             self._log(mid, '连续失败达上限，自动暂停')
+        elif (not ok) and reason == 'volume':
+            quiet = task.get('quiet_hours') or []
+            retry = int(task.get('guard_retry_minutes') or DEFAULT_RETRY_MINUTES)
+            task['next_run_at'] = next_allowed(
+                now + timedelta(minutes=retry), quiet, 0).isoformat(timespec='seconds')
         else:
             quiet = task.get('quiet_hours') or []
             task['next_run_at'] = compute_next_run(
@@ -607,7 +696,7 @@ if __name__ == '__main__':
                 n = len(self.calls)
                 jobs = [{'job_id': f'j{i}', '职位名称': f'岗位{i}', '公司名称': 'X',
                          '薪资': '15K', '区域': '浦东新区', 'job_url': 'https://zhipin.com/x'}
-                        for i in range(n + 3)]   # 每轮多 1 个 → 稳定产生 new
+                        for i in range(n + 8)]   # 每轮多 1 个 → 稳定产生 new；≥ 绝对下限 5
                 atomic_write_json(os.path.join(raw, 'jobs_cache.json'), jobs)
                 atomic_write_json(os.path.join(raw, 'progress.json'),
                                   {'status': 'done', 'scraped': len(jobs)})
@@ -645,7 +734,7 @@ if __name__ == '__main__':
             sch._tick(datetime(2026, 10, 25, 10, 1))
             assert sch.active is None
             t = store.load(mid)
-            assert t['rounds'] == 1 and t['stats']['new_total'] == 4, t['stats']
+            assert t['rounds'] == 1 and t['stats']['new_total'] == 9, t['stats']
             assert t['login']['last_login_verified_at']
             # 下一轮应落在 13:01~13:16（间隔 3h + 防规律抖动）
             nxt = parse_iso(store.load(mid)['next_run_at'])
@@ -655,7 +744,7 @@ if __name__ == '__main__':
             assert sch.active and sch.active['round_no'] == 2, sch.active
             sch._tick(nxt + timedelta(minutes=1))
             t = store.load(mid)
-            assert t['rounds'] == 2 and t['stats']['new_total'] == 5, t['stats']
+            assert t['rounds'] == 2 and t['stats']['new_total'] == 10, t['stats']
             assert t['last_report']['new'] == 1 and t['last_report']['missing'] == 0
             # 夜间窗口：改间隔 6h，19:00 跑第 3 轮 → 19+6 落在深夜，应顺延到 08:00 之后
             t = store.load(mid)
@@ -825,6 +914,107 @@ if __name__ == '__main__':
             sp7 = _glob7.glob(os.path.join(st7.rounds_dir(mid7), '*', 'summary.json'))[0]
             assert '0 条' in (json.load(open(sp7, encoding='utf-8')).get('error') or ''), sp7
             print('zero-scraped fail OK')
+        # ── 分层抓取回归：预置跳过明细 + 合并，防「大面积未出现」误判 ──
+        with tempfile.TemporaryDirectory() as td8:
+            st8 = MonitorStore(td8)
+
+            class TierRunner(FakeRunner):
+                def start_crawl(self, params):
+                    self.calls.append(params)
+                    raw = params['output_dir']
+                    os.makedirs(raw, exist_ok=True)
+                    preseed = read_json(os.path.join(raw, PRESEED_JSON), []) or []
+                    skip = {r['job_id'] for r in preseed} if isinstance(preseed, list) else set()
+                    jobs = [{'job_id': f'j{i}', '职位名称': f'岗位{i}', '公司名称': 'X',
+                             '薪资': '15K', '区域': '浦东新区', 'job_url': 'https://zhipin.com/x'}
+                            for i in range(20)]
+                    fetched = [j for j in jobs if j['job_id'] not in skip]  # 模拟爬虫跳过详情
+                    atomic_write_json(os.path.join(raw, 'jobs_cache.json'), fetched)
+                    atomic_write_json(os.path.join(raw, 'progress.json'),
+                                      {'status': 'done', 'scraped': len(fetched)})
+                    self.last_fetched = len(fetched)
+                    return {'ok': True, 'pid': 2000 + len(self.calls)}
+
+            sch_h = MonitorScheduler(st8, TierRunner(), guard=FakeGuard(), tick_seconds=1,
+                                     log=lambda m: None)
+            mid8, _ = st8.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=分'})
+            for i in range(3):
+                t8 = st8.load(mid8)
+                t8['next_run_at'] = f'2026-10-26T{16 + i}:00:00'
+                st8.save(t8)
+                sch_h._tick(datetime(2026, 10, 26, 16 + i, 0))
+                sch_h._tick(datetime(2026, 10, 26, 16 + i, 1))
+            t8 = st8.load(mid8)
+            assert t8['rounds'] == 3 and t8['stats']['failed_rounds'] == 0, t8['stats']
+            assert t8['stats']['total_jobs'] == 20 and t8['stats']['last_scraped'] == 20, t8['stats']
+            import glob as _g8
+            for sp in _g8.glob(os.path.join(st8.rounds_dir(mid8), '*', 'summary.json')):
+                sm = json.load(open(sp, encoding='utf-8'))
+                assert sm['ok'] and sm['diff']['scraped'] == 20, sm   # 每轮都应是完整 20 条
+            rd8 = st8.rounds_dir(mid8)
+            r2 = sorted(n for n in os.listdir(rd8))[1]
+            ps8 = read_json(os.path.join(rd8, r2, '01_raw', PRESEED_JSON), [])
+            assert len(ps8) == 8, len(ps8)   # 20 条 - 抽样 12 条 = 预置 8 条
+            print('tiered-preseed OK')
+
+        # ── P0 抓取量闸门：列表页缩水 → 无效轮不写缺席；两次即暂停 ──
+        with tempfile.TemporaryDirectory() as td9:
+            st9 = MonitorStore(td9)
+
+            class ShrinkRunner(FakeRunner):
+                def start_crawl(self, params):
+                    self.calls.append(params)
+                    raw = params['output_dir']
+                    os.makedirs(raw, exist_ok=True)
+                    n = len(self.calls)
+                    jobs = [{'job_id': f'j{i}', '职位名称': f'岗位{i}', '公司名称': 'X',
+                             '薪资': '15K', '区域': '浦东新区', 'job_url': 'https://zhipin.com/x'}
+                            for i in range(20 if n == 1 else 3)]
+                    atomic_write_json(os.path.join(raw, 'jobs_cache.json'), jobs)
+                    atomic_write_json(os.path.join(raw, 'progress.json'),
+                                      {'status': 'done', 'scraped': len(jobs)})
+                    return {'ok': True, 'pid': 3000 + n}
+
+            sch_i = MonitorScheduler(st9, ShrinkRunner(), guard=FakeGuard(), tick_seconds=1,
+                                     log=lambda m: None)
+            mid9, _ = st9.create({'url': 'https://www.zhipin.com/web/geek/jobs?query=缩'})
+            t9 = st9.load(mid9); t9['next_run_at'] = '2026-10-26T15:00:00'; st9.save(t9)
+            sch_i._tick(datetime(2026, 10, 26, 15, 0)); sch_i._tick(datetime(2026, 10, 26, 15, 1))
+            t9 = st9.load(mid9)
+            assert t9['stats']['total_jobs'] == 20 and t9['stats']['last_scraped'] == 20
+            t9 = st9.load(mid9); t9['next_run_at'] = '2026-10-26T16:00:00'; st9.save(t9)
+            sch_i._tick(datetime(2026, 10, 26, 16, 0)); sch_i._tick(datetime(2026, 10, 26, 16, 1))
+            t9 = st9.load(mid9)
+            assert t9['stats']['failed_rounds'] == 1 and t9['volume_fail_streak'] == 1, t9
+            assert t9['status'] == 'running' and '16:2' in (t9['next_run_at'] or ''), t9
+            seen9 = read_json(st9.seen_path(mid9))
+            assert all(r['absent_streak'] == 0 for r in seen9.values()), seen9   # 无效轮不写缺席
+            t9 = st9.load(mid9); t9['next_run_at'] = '2026-10-26T16:30:00'; st9.save(t9)
+            sch_i._tick(datetime(2026, 10, 26, 16, 30)); sch_i._tick(datetime(2026, 10, 26, 16, 31))
+            t9 = st9.load(mid9)
+            assert t9['status'] == 'paused' and t9['next_run_at'] is None, t9
+            codes9 = [a['code'] for a in t9['alerts']]
+            assert 'volume_collapse' in codes9 and 'auto_paused' in codes9, codes9
+            print('volume-gate OK')
+
+        # ── 重发识别：同「公司+标题+区域」、job_id 变 → 记重发，不双计 ──
+        with tempfile.TemporaryDirectory() as td10:
+            sp10 = os.path.join(td10, 'seen.json')
+            atomic_write_json(sp10, {})
+            d1 = apply_round(sp10, 1, [{'job_id': 'a1', 'title': '总助', 'company': '甲公司',
+                                        'area': '静安', 'salary': '20K', 'desc': 'x'}])
+            d2 = apply_round(sp10, 2, [])
+            assert len(d2['missing']) == 1 and d2['missing'][0]['absent_rounds'] == 1, d2
+            d3 = apply_round(sp10, 3, [{'job_id': 'b9', 'title': '总助', 'company': '甲公司',
+                                        'area': '静安', 'salary': '20K', 'desc': 'x'}])
+            assert len(d3['new']) == 0 and len(d3['reposted']) == 1, (d3['new'], d3['reposted'])
+            assert d3['reposted'][0]['repost_of'] == 'a1', d3['reposted']
+            assert len(d3['missing']) == 0, d3['missing']       # 旧 id 被替代，不判未出现
+            seen10 = read_json(sp10)
+            assert seen10['a1'].get('superseded_by') == 'b9', seen10['a1']
+            assert seen10['b9'].get('repost_of') == 'a1' and seen10['b9']['first_round'] == 1
+            assert len(seen10) == 2, seen10                     # 只增不删
+            print('repost OK')
         print('monitor_scheduler self-test PASS')
         sys.exit(0)
     print('用法: python3 monitor_scheduler.py --self-test')

@@ -2569,7 +2569,7 @@ function renderMonitorDash(mid, pick) {
     var s = m.stats || {};
     document.getElementById('monDashGrid').innerHTML = [
       ['已爬轮次', (m.rounds || 0) + ' 轮', '间隔 ' + m.interval_hours + 'h'],
-      ['岗位总数', s.total_jobs || 0, '累计新增 +' + (s.new_total || 0)],
+      ['岗位总数', s.total_jobs || 0, '累计新增 +' + (s.new_total || 0) + ' · 重发 ' + (s.reposted_total || 0)],
       ['未出现/变更', (s.missing_total || 0) + ' / ' + (s.changed_total || 0),
         m.remaining_hours != null ? '剩余 ' + m.remaining_hours + 'h' : '不限时长'],
       ['失败轮次', s.failed_rounds || 0,
@@ -2734,7 +2734,8 @@ function monRound(name) {
         '<div style="font-size:11px;color:var(--dim);margin-bottom:6px">列表页有翻页与排序波动，未出现 ≠ 已下架；连续 2 轮未出现才标「疑似下架」。</div>' +
         list(d.missing, 'var(--yellow)') +
         '<h4 style="font-size:13px;color:var(--accent);margin:14px 0 6px">✏️ JD 内容变更（' + ((d.changed||[]).length) + '）</h4>' + list(d.changed, 'var(--accent)') +
-        '<h4 style="font-size:13px;color:var(--purple);margin:14px 0 6px">🔄 重新出现（' + ((d.reappeared||[]).length) + '）</h4>' + list(d.reappeared, 'var(--purple)');
+        '<h4 style="font-size:13px;color:var(--purple);margin:14px 0 6px">🔄 重新出现（' + ((d.reappeared||[]).length) + '）</h4>' + list(d.reappeared, 'var(--purple)') +
+        '<h4 style="font-size:13px;color:#c084fc;margin:14px 0 6px">♻️ 重新发布（' + ((d.reposted||[]).length) + '）</h4>' + list(d.reposted, 'var(--purple)');
     }
     rv.style.display = 'block';
   });
