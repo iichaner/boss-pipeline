@@ -791,7 +791,7 @@ if __name__ == '__main__':
             # 第 1 轮
             sch._tick(datetime(2026, 10, 25, 10, 0))
             assert sch.active and sch.active['round_no'] == 1, sch.active
-            assert runner.calls and runner.calls[0]['max_scroll'] == 50
+            assert runner.calls and runner.calls[0]['max_scroll'] == 30   # 长滚动：30 次（ii 定 2026-10-27）
             sch._tick(datetime(2026, 10, 25, 10, 1))
             assert sch.active is None
             t = store.load(mid)

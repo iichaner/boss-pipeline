@@ -27,10 +27,10 @@ SEEN_FILE = 'seen_jobs.json'
 
 # ── 默认参数（PLAN.md §4.6，全部可被任务配置覆盖）────────────────
 DEFAULT_SCROLL = {
-    'max_scroll': 50,
+    'max_scroll': 30,
     'max_jobs': 300,
     'base_wait': 20,
-    'scroll_wait': 5,
+    'scroll_wait': 0.2,
     'scroll_delta': '1.5-2.5',
     'job_gap': '1.0-3.0',
     'detail_jitter': 3,

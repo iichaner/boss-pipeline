@@ -195,9 +195,9 @@ class CrawlManager:
         if target_url:
             cmd += ['--url', target_url]
         cmd += [
-            '--max-scroll', str(params.get('max_scroll', 50)),
+            '--max-scroll', str(params.get('max_scroll', 30)),
             '--base-wait', str(params.get('base_wait', 20)),
-            '--scroll-wait', str(params.get('scroll_wait', 5)),
+            '--scroll-wait', str(params.get('scroll_wait', 0.2)),
             '--scroll-delta', str(params.get('scroll_delta', '1.5-2.5')),
             '--job-gap', str(params.get('job_gap', '1.0-3.0')),
             '--detail-jitter', str(params.get('detail_jitter', 3)),
