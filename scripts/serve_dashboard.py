@@ -1431,6 +1431,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                             return self._json_response(row)
             except Exception:
                 continue
+        # 回退视图：分层抓取轮次里预置岗位不在 crawler CSV，但视图 jobs_cache.json 有
+        cache = self._read_json_raw(dir_, 'jobs_cache.json')
+        if isinstance(cache, list):
+            for row in cache:
+                if (row.get('job_id') or '') == job_id:
+                    if job_id in mapping:
+                        row.update(mapping[job_id])
+                    manual = self._read_json_raw(dir_, 'priorities.json') or {}
+                    if isinstance(manual, dict) and manual.get(job_id) in ('高', '中', '低'):
+                        row['judgment_level'] = manual[job_id]
+                        row['judgment_manual'] = True
+                    return self._json_response(row)
         return self._json_response({"error": f"job_id {job_id} not found"}, 404)
 
     @staticmethod

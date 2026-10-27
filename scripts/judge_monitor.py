@@ -48,8 +48,9 @@ LEVEL_CN_TO_EN = {'高': 'high', '中': 'medium', '低': 'low'}
 
 
 def _find_latest_raw_csv(output_dir: str) -> str:
-    """找到最新的 raw CSV 文件。"""
-    csvs = glob.glob(os.path.join(output_dir, 'jobs_data*.csv'))
+    """找到最新的 raw CSV 文件（排除内部预置文件）。"""
+    csvs = [fp for fp in glob.glob(os.path.join(output_dir, 'jobs_data*.csv'))
+            if not os.path.basename(fp).startswith(('jobs_data_preseed', '_preseed'))]
     if not csvs:
         return None
     return max(csvs, key=os.path.getmtime)
@@ -64,15 +65,25 @@ def _find_or_create_judgment_csv(raw_csv: str, result_dir: str) -> str:
     if os.path.isfile(judgment_csv):
         return judgment_csv
 
-    # 创建空判定 CSV（带表头）
+    # 创建空判定 CSV（带表头）；raw_csv 若是 json（视图源）则直接取行
     try:
-        with open(raw_csv, 'r', encoding='utf-8-sig', newline='') as f:
-            reader = csv.DictReader(f)
-            fieldnames = list(reader.fieldnames or [])
-            for col in APPEND_COLS:
-                if col not in fieldnames:
-                    fieldnames.append(col)
-            rows = list(reader)
+        if raw_csv.endswith('.json'):
+            with open(raw_csv, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            rows = data if isinstance(data, list) else []
+            fieldnames = []
+            for r in rows:
+                for k in r.keys():
+                    if k not in fieldnames:
+                        fieldnames.append(k)
+        else:
+            with open(raw_csv, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
+        for col in APPEND_COLS:
+            if col not in fieldnames:
+                fieldnames.append(col)
 
         with open(judgment_csv, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -138,6 +149,22 @@ def _load_existing_judgments(judgment_csv: str, priorities_path: str) -> dict:
             pass
 
     return judgments
+
+
+def _read_view_rows(output_dir: str):
+    """读本轮视图行（jobs_cache.json）。分层抓取轮次里 crawler CSV 只含少数实抓，
+    而视图是预置+实抓的合并——用户在中列看到的岗位 = 视图，判定就该判这些。"""
+    jc = os.path.join(output_dir, 'jobs_cache.json')
+    if not os.path.isfile(jc):
+        return None
+    try:
+        with open(jc, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    return [r for r in data if (r.get('job_id') or '').strip()]
 
 
 def _read_raw_rows(raw_csv: str) -> list:
@@ -299,6 +326,7 @@ class JudgeMonitor:
                 'judged_count': total_judged,
                 'skipped_count': total_skipped,
                 'total': total_rows,
+                'message': (last_result or {}).get('message'),
                 'judgment_csv': last_result.get('judgment_csv') if last_result else None,
             }
 
@@ -307,14 +335,20 @@ class JudgeMonitor:
 
     def _do_judge(self, output_dir: str, mode: str) -> dict:
         """执行判定（需持有锁）。"""
-        # 1. 找到 raw CSV
-        raw_csv = _find_latest_raw_csv(output_dir)
-        if not raw_csv:
-            return {'ok': False, 'error': '未找到爬取数据（缺少 jobs_data*.csv）'}
+        # 1. 数据源：优先视图 jobs_cache.json（=用户所见）；回退 crawler CSV（排除预置）
+        raw_rows = _read_view_rows(output_dir)
+        if raw_rows:
+            source_path = os.path.join(output_dir, 'jobs_cache.json')
+        else:
+            raw_csv = _find_latest_raw_csv(output_dir)
+            if not raw_csv:
+                return {'ok': False, 'error': '未找到爬取数据（缺少 jobs_data*.csv / jobs_cache.json）'}
+            raw_rows = _read_raw_rows(raw_csv)
+            source_path = raw_csv
 
         # 2. 找到或创建判定 CSV
         result_dir = os.path.join(os.path.dirname(output_dir), '02_result')
-        judgment_csv = _find_or_create_judgment_csv(raw_csv, result_dir)
+        judgment_csv = _find_or_create_judgment_csv(source_path, result_dir)
         if not judgment_csv:
             return {'ok': False, 'error': '无法创建判定 CSV'}
 
@@ -322,8 +356,7 @@ class JudgeMonitor:
         priorities_path = os.path.join(output_dir, 'priorities.json')
         existing = _load_existing_judgments(judgment_csv, priorities_path)
 
-        # 4. 读取 raw CSV
-        raw_rows = _read_raw_rows(raw_csv)
+        # 4. 行数据已在步骤 1 就绪（视图或 crawler CSV）；仅兜底空数据
         if not raw_rows:
             return {'ok': False, 'error': 'raw CSV 为空'}
 
@@ -341,7 +374,8 @@ class JudgeMonitor:
 
         if not to_judge:
             return {'ok': True, 'judged_count': 0, 'skipped_count': skipped,
-                    'total': len(raw_rows), 'message': '无未判定的 JD'}
+                    'total': len(raw_rows),
+                    'message': ('本轮岗位已全部判定（共 %d 条）' % len(raw_rows)) if skipped else '无未判定的 JD'}
 
         # 增量模式：如果未判定数量不足 BATCH_SIZE，跳过
         if mode == 'incremental' and len(to_judge) < BATCH_SIZE:

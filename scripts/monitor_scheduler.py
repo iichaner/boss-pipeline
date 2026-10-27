@@ -16,7 +16,6 @@
 import os
 import sys
 import json
-import csv
 import time
 import signal
 import http.client
@@ -354,11 +353,9 @@ class MonitorScheduler:
             rows = preseed_rows(seen, exclude_ids=sample)
             if rows:
                 os.makedirs(raw_dir, exist_ok=True)
-                with open(os.path.join(raw_dir, PRESEED_CSV), 'w',
-                          newline='', encoding='utf-8-sig') as f:
-                    w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-                    w.writeheader()
-                    w.writerows(rows)
+                # 只落 _preseed.json：爬虫 load_existing_job_ids 直接读它做跳过；
+                # 不再写 jobs_data_preseed.csv（会污染全站 jobs_data*.csv 通配，
+                # 判定/统计/详情/对账都会误读内部清单）——2026-10-27 判定 bug 根因
                 atomic_write_json(os.path.join(raw_dir, PRESEED_JSON), rows)
                 skipped_details = len(rows)
         except Exception as e:

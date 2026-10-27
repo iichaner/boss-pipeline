@@ -46,7 +46,8 @@ KEEP_ROUNDS_DETAIL = 50          # 保留最近多少轮的原始明细，更早
 VOLUME_FLOOR_RATIO = 0.6         # 本轮列表规模 < 上轮 × 该比例 → 判「抓取量异常」无效轮（P0）
 VOLUME_FLOOR_ABS = 5             # 绝对下限：连 5 条都不到一律无效（首轮/无基线也适用）
 DETAIL_SAMPLE_PER_ROUND = 12      # 每轮抽样重抓详情的条数，其余已知岗位跳过详情（分层抓取）
-PRESEED_CSV = 'jobs_data_preseed.csv'   # 预置 CSV：让爬虫按续爬逻辑跳过这些 job_id 的详情页
+PRESEED_CSV = '_preseed_data.csv'      # 预置 CSV（改名：不能再叫 jobs_data*，
+                                        # 否则污染全站 jobs_data*.csv 通配——判定/统计/判定映射会误读）
 PRESEED_JSON = '_preseed.json'
 
 SCROLL_KEYS = tuple(DEFAULT_SCROLL.keys())
@@ -363,6 +364,8 @@ def read_round_jobs(raw_dir: str) -> list:
                 })
         return jobs
     for fp in sorted(glob_mod.glob(os.path.join(raw_dir, '*.csv'))):
+        if os.path.basename(fp).startswith('_'):   # 跳过 _preseed_data.csv 等内部文件
+            continue
         try:
             with open(fp, 'r', encoding='utf-8-sig') as f:
                 for row in csv.DictReader(f):
