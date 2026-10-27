@@ -14,6 +14,7 @@
 
 import os
 import json
+import re
 import csv
 import glob as glob_mod
 import hashlib
@@ -200,6 +201,8 @@ class MonitorStore:
         except Exception:
             pass
         label = (params.get('label') or '').strip() or f'{date_str}-{query or "监控"}'
+        # M-7：清洗路径穿越与引号注入字符，label 会拼进文件路径并出现在内联 onclick 里
+        label = re.sub(r"[/\\\\'\"\.\x00-\x1f]+", '_', label).strip('_') or '监控'
         mid = self._unique_id(label if label.startswith(PREFIX) else f'{PREFIX}{label}')
 
         # 数值参数：必须区分「没传」与「传了 0」。
@@ -386,8 +389,13 @@ def read_round_jobs(raw_dir: str) -> list:
 
 
 def _jd_fingerprint(job: dict) -> str:
-    """JD 指纹：描述+薪资+标题的组合哈希，用于识别「内容变更」。"""
-    src = '|'.join([job.get('desc', ''), job.get('salary', ''), job.get('title', '')])
+    """JD 指纹：描述+薪资+标题的组合哈希，用于识别「内容变更」。
+
+    描述先截断 [:4000] 再哈希，与 seen 表入库截断对齐（S-3）：
+    否则超长 JD 会在「实抓轮(全文) vs 预置轮(截断文)」之间稳定产生假变更。
+    """
+    desc = (job.get('desc') or '')[:4000]
+    src = '|'.join([desc, job.get('salary', ''), job.get('title', '')])
     return hashlib.md5(src.encode('utf-8', 'ignore')).hexdigest()[:12]
 
 
@@ -403,21 +411,30 @@ def _job_key(rec: dict) -> str:
     return '|'.join(parts)
 
 
-def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
+def apply_round(seen_path: str, round_no: int, cards: list, details: list) -> dict:
     """把本轮结果并入跨轮主表，算出差异。
 
+    存在性（this_ids）只来自 cards（列表页实际可见 = list_jobs.json），
+    预置回显绝不参与在场判定——这是分层抓取能成立的前提（S-1 根治）。
+    details 只用于刷新内容（desc/薪资等）；未实抓详情的岗位沿用主表旧内容，
+    因此不会产生假「未出现」、假「变更」。
+
     返回：{scraped, new[], missing[], reappeared[], changed[], reposted[], suspected_delisted, total_seen}
-    - new        : 历史从未出现过的 job_id
-    - missing    : 本轮未出现（不等于下架，列表页有翻页/排序波动）
-    - suspected  : 连续 ≥2 轮未出现的 missing，才标注「疑似下架」
-    - reappeared : 之前 missing、本轮又出现的
-    - changed    : 同一 job_id 的 JD 指纹变化（薪资/描述/标题被改写）
-    - reposted   : job_id 是新的，但「公司+标题+区域」与某条当前缺席记录一致
-                   → 判为同一岗位重发：不计入 new，旧 job_id 也不计入 missing
+    - new        : 本次列表页出现、历史从未见过的 job_id
+    - missing    : 历史有、本次列表页没有（不等于下架；连续 ≥2 轮缺席才标疑似下架）
+    - reappeared : 之前 missing、本轮又出现
+    - changed    : 同一 job_id 本轮实抓详情后 JD 指纹变化（薪资/描述/标题被改写）
+    - reposted   : job_id 新，但「公司+标题+区域」命中当前缺席记录 → 同一岗位重发
     """
     seen = read_json(seen_path, {}) or {}
-    this_ids = {j['job_id'] for j in jobs if j.get('job_id')}
+    this_ids = {c['job_id'] for c in cards if c.get('job_id')}
     prev_ids = set(seen.keys())
+
+    detail_map = {}
+    for d in (details or []):
+        jid = d.get('job_id')
+        if jid:
+            detail_map[jid] = d
 
     # 重发索引：指纹 → 未替代的 job_id 列表
     fp_index = {}
@@ -425,71 +442,76 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
         if rec.get('superseded_by'):
             continue
         key = _job_key(rec)
-        if rec.get('company') and rec.get('title') and '|' in key:
+        if rec.get('company') and rec.get('title'):
             fp_index.setdefault(key, []).append(jid)
 
     new, reappeared, changed, reposted = [], [], [], []
-    for j in jobs:
-        jid = j.get('job_id') or ''
+    for c in cards:
+        jid = c.get('job_id') or ''
         if not jid:
             continue
-        title = j.get('title') or ''
-        company = j.get('company') or ''
-        salary = j.get('salary') or ''
-        fp = _jd_fingerprint(j)
+        title = c.get('title') or ''
+        company = c.get('company') or ''
+        salary = c.get('salary') or ''
+        detail = detail_map.get(jid)
+        # 指纹：实抓轮用抓到内容；未实抓轮沿用主表旧内容 → 不产生假变更
+        eff_desc = (detail or {}).get('desc') or (seen.get(jid) or {}).get('desc') or ''
+        fp = _jd_fingerprint({'desc': eff_desc, 'salary': salary, 'title': title})
         rec = seen.get(jid)
         if rec is None:
-            key = _job_key({'company': company, 'title': title, 'area': j.get('area') or ''})
+            key = _job_key({'company': company, 'title': title, 'area': c.get('area') or ''})
             cand = [x for x in fp_index.get(key, [])
                     if x not in this_ids and not seen[x].get('superseded_by')]
             if cand and company and title:
-                old_id = cand[0]
+                old_id = max(cand, key=lambda x: seen[x].get('absent_streak', 0))
                 seen[old_id]['superseded_by'] = jid
                 seen[jid] = {
                     'title': title, 'company': company, 'salary': salary,
-                    'area': j.get('area') or '', 'city': j.get('city') or '',
-                    'url': j.get('url') or '', 'desc': (j.get('desc') or '')[:4000],
-                    'exp': j.get('exp') or '', 'edu': j.get('edu') or '',
-                    'security_id': j.get('security_id') or '', 'created': j.get('created') or '',
+                    'area': c.get('area') or '', 'city': (detail or {}).get('city') or '',
+                    'url': c.get('url') or '', 'desc': ((detail or {}).get('desc') or '')[:4000],
+                    'exp': (detail or {}).get('exp') or '', 'edu': (detail or {}).get('edu') or '',
+                    'security_id': (detail or {}).get('security_id') or '',
+                    'created': (detail or {}).get('created') or '',
                     'jd_fp': fp,
                     'first_round': seen[old_id].get('first_round', round_no),
                     'last_round': round_no, 'absent_streak': 0, 'repost_of': old_id,
                 }
                 reposted.append({'job_id': jid, 'title': title, 'company': company,
-                                 'salary': salary, 'area': j.get('area') or '',
-                                 'url': j.get('url') or '', 'repost_of': old_id})
+                                 'salary': salary, 'area': c.get('area') or '',
+                                 'url': c.get('url') or '', 'repost_of': old_id})
                 continue
             seen[jid] = {
                 'title': title, 'company': company, 'salary': salary,
-                'area': j.get('area') or '', 'city': j.get('city') or '',
-                'url': j.get('url') or '', 'desc': (j.get('desc') or '')[:4000],
-                'exp': j.get('exp') or '', 'edu': j.get('edu') or '',
-                'security_id': j.get('security_id') or '', 'created': j.get('created') or '',
+                'area': c.get('area') or '', 'city': (detail or {}).get('city') or '',
+                'url': c.get('url') or '', 'desc': ((detail or {}).get('desc') or '')[:4000],
+                'exp': (detail or {}).get('exp') or '', 'edu': (detail or {}).get('edu') or '',
+                'security_id': (detail or {}).get('security_id') or '',
+                'created': (detail or {}).get('created') or '',
                 'jd_fp': fp,
                 'first_round': round_no, 'last_round': round_no, 'absent_streak': 0,
             }
             new.append({'job_id': jid, 'title': title, 'company': company,
-                        'salary': salary, 'area': j.get('area') or '',
-                        'url': j.get('url') or ''})
+                        'salary': salary, 'area': c.get('area') or '',
+                        'url': c.get('url') or ''})
             continue
 
         if rec.get('absent_streak', 0) > 0:
             reappeared.append({'job_id': jid, 'title': title or rec.get('title'),
                                'absent_rounds': rec.get('absent_streak')})
-        if rec.get('jd_fp') != fp:
+        if detail is not None and rec.get('jd_fp') != fp:
             changed.append({'job_id': jid, 'title': title,
                             'old_salary': rec.get('salary'), 'new_salary': salary})
         rec.update({'title': title or rec.get('title', ''),
                     'company': company or rec.get('company', ''),
                     'salary': salary or rec.get('salary', ''),
-                    'area': j.get('area') or rec.get('area', ''),
-                    'city': j.get('city') or rec.get('city', ''),
-                    'url': j.get('url') or rec.get('url', ''),
-                    'desc': (j.get('desc') or rec.get('desc') or '')[:4000],
-                    'exp': j.get('exp') or rec.get('exp', ''),
-                    'edu': j.get('edu') or rec.get('edu', ''),
-                    'security_id': j.get('security_id') or rec.get('security_id', ''),
-                    'created': j.get('created') or rec.get('created', ''),
+                    'area': c.get('area') or rec.get('area', ''),
+                    'city': (detail or {}).get('city') or rec.get('city', ''),
+                    'url': c.get('url') or rec.get('url', ''),
+                    'desc': ((detail or {}).get('desc') or rec.get('desc') or '')[:4000],
+                    'exp': (detail or {}).get('exp') or rec.get('exp', ''),
+                    'edu': (detail or {}).get('edu') or rec.get('edu', ''),
+                    'security_id': (detail or {}).get('security_id') or rec.get('security_id', ''),
+                    'created': (detail or {}).get('created') or rec.get('created', ''),
                     'jd_fp': fp, 'last_round': round_no, 'absent_streak': 0})
 
     missing = []
@@ -508,7 +530,7 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
     atomic_write_json(seen_path, seen)
     return {
         'round': round_no,
-        'scraped': len(jobs),
+        'scraped': len(cards),
         'new': new,
         'missing': missing,
         'reappeared': reappeared,
@@ -517,6 +539,32 @@ def apply_round(seen_path: str, round_no: int, jobs: list) -> dict:
         'suspected_delisted': sum(1 for m in missing if m['suspected_delisted']),
         'total_seen': len(seen),
     }
+
+
+def read_round_cards(raw_dir: str) -> list:
+    """读本轮「列表页实际可见」岗位卡片（list_jobs.json）。
+
+    存在性判定的唯一依据（新增/未出现/重发/抓取量闸门都基于它）。
+    旧版爬虫没有该文件时回退到 jobs_cache.json 的 id，保证不崩。
+    """
+    cards = read_json(os.path.join(raw_dir, 'list_jobs.json'))
+    if isinstance(cards, list):
+        out = []
+        for c in cards:
+            jid = (c.get('job_id') or '').strip()
+            if not jid:
+                continue
+            out.append({'job_id': jid,
+                        'title': c.get('title') or c.get('职位名称') or '',
+                        'company': c.get('company') or c.get('公司名称') or '',
+                        'salary': c.get('salary') or c.get('薪资') or '',
+                        'area': c.get('area') or c.get('区域') or '',
+                        'url': c.get('url') or c.get('job_url') or c.get('岗位链接') or ''})
+        return out
+    jobs = read_round_jobs(raw_dir)
+    return [{'job_id': j['job_id'], 'title': j.get('title', ''),
+             'company': j.get('company', ''), 'salary': j.get('salary', ''),
+             'area': j.get('area', ''), 'url': j.get('url', '')} for j in jobs]
 
 
 def preseed_rows(seen: dict, exclude_ids=None) -> list:

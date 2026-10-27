@@ -139,6 +139,7 @@ class CrawlManager:
         # 任务管理器：记录所有启动过的任务（含已结束），支持暂停/恢复/停止/重启
         self.tasks = {}           # task_id -> task dict
         self._task_seq = 0
+        self._spawn_lock = threading.Lock()   # M-4：check+Popen 原子化，防双爬
 
     def start_crawl(self, params: dict) -> dict:
         """启动爬取子进程。params: {url, max_scroll, max_jobs, base_wait, output_dir, session_name}"""
@@ -215,11 +216,16 @@ class CrawlManager:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         log_file = open(log_path, 'a')
 
-        self.process = subprocess.Popen(
-            cmd, stdout=log_file, stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid
-        )
-        self.kind = 'crawl'
+        # M-4 二次检查（TOCTOU 防线）：导航/拼参期间若已被其他线程起爬，放弃
+        with self._spawn_lock:
+            if self.process and self.process.poll() is None:
+                return {'error': '已有爬取任务在运行'}
+            # M-9: stdin 接黑洞，未登录时爬虫的 input() 立即 EOF 走报错路径而不是挂死
+            self.process = subprocess.Popen(
+                cmd, stdout=log_file, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, preexec_fn=os.setsid
+            )
+            self.kind = 'crawl'
         self.started_at = time.time()
         self.pid = self.process.pid
         self.log_path = log_path
@@ -256,11 +262,14 @@ class CrawlManager:
         log_path = os.path.join(os.path.dirname(csv_path), 'greet_pipeline.log')
         log_file = open(log_path, 'a')
 
-        self.process = subprocess.Popen(
-            cmd, stdout=log_file, stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid
-        )
-        self.kind = 'greet'
+        with self._spawn_lock:
+            if self.process and self.process.poll() is None:
+                return {'error': '已有任务在运行'}
+            self.process = subprocess.Popen(
+                cmd, stdout=log_file, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, preexec_fn=os.setsid
+            )
+            self.kind = 'greet'
         self.started_at = time.time()
         self.pid = self.process.pid
         self.log_path = log_path
@@ -653,7 +662,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 })
         except Exception:
             pass
-        # 按更新时间倒序
+        # 按更新时间升序（新→旧展示由调用方负责，这里只保证稳定排序）
         sessions.sort(key=lambda s: s.get('updatedAt', ''), reverse=False)
         return sessions
 
@@ -997,6 +1006,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        # M-7: localhost-only CSRF 防线——浏览器跨站 POST 会带 Origin，非本机一律拒绝
+        origin = self.headers.get('Origin') or ''
+        if origin and not (
+            origin.startswith('http://localhost:') or origin.startswith('http://127.0.0.1:')
+            or origin in ('http://localhost', 'http://127.0.0.1')
+        ):
+            return self._json_response({'error': 'forbidden origin'}, 403)
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.lstrip('/')
         content_length = int(self.headers.get('Content-Length', 0))
@@ -2012,8 +2028,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _json_response(self, data, code=200):
         try:
             body = json.dumps(data, ensure_ascii=False).encode('utf-8')
-        except TypeError as e:
-            # 兜底：混入 datetime 等不可序列化对象时降级为字符串，而不是整条响应断连
+        except (TypeError, ValueError, RecursionError) as e:
+            # 兜底：混入 datetime/循环引用等不可序列化对象时降级为字符串，而不是整条响应断连
             # （回归 2026-10-26：active_round 含 datetime → /api/monitors 无响应 → 前端下拉变「接口不可用」）
             print(f"[serve_dashboard] ⚠️ JSON 序列化降级: {e}", file=sys.stderr, flush=True)
             body = json.dumps(data, ensure_ascii=False, default=str).encode('utf-8')
@@ -2262,7 +2278,8 @@ def start_dashboard_server(output_dir: str, port: int = 8765, background: bool =
     except Exception as e:
         print(f"[serve_dashboard] 长期监控启动失败（不影响现有爬取）: {e}")
 
-    server = http.server.HTTPServer(('127.0.0.1', port), DashboardHandler)
+    # M-3: 线程化，守卫检查等慢请求不再冻结全站轮询
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', port), DashboardHandler)
     server.allow_reuse_address = True
 
     if background:

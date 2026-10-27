@@ -422,7 +422,7 @@
   <button class="btn-mini cyan" id="btnCopyUrl" onclick="copySearchUrl()" title="复制列表页链接">🔗 复制列表页链接</button>
   <span id="monOps" style="display:none;align-items:center;gap:6px;flex-wrap:wrap;padding-left:8px;border-left:1px solid var(--border)">
     <button class="btn-mini green" id="monBtnToggle" onclick="monToggleRun()">🟢 启动</button>
-    <button class="btn-mini cyan" onclick="monAct('run-now')">⚡ 立即一轮</button>
+    <button class="btn-mini cyan" id="monBtnRunNow" onclick="monAct('run-now')">⚡ 立即一轮</button>
     <button class="btn-mini" onclick="monEditParams()">⚙️ 参数</button>
     <button class="btn-mini" onclick="monAct('relogin')">🔑 重登校验</button>
     <button class="btn-mini" onclick="openFolderMonitor()">📂 目录</button>
@@ -1036,7 +1036,11 @@ function updateDashboard(data) {
   var showTotal = data.list_total || csvCnt || 0;
   // done 但未完（限量爬取/中途停止）→ 仍然显示续爬
   var incomplete = showDone < showTotal || showTotal === 0;
-  if (incomplete || data.status === 'running' || data.status === 'error') {
+  // 监控视图下不显示一次性任务的续爬/跳过滚动按钮（会改写监控轮次目录）
+  if (currentMonitorId) {
+    resumeBtn.style.display = 'none';
+    skipBtn.style.display = 'none';
+  } else if (incomplete || data.status === 'running' || data.status === 'error') {
     resumeBtn.style.display = 'block';
     resumeBtn.dataset.mode = showTotal > 0 ? 'resume' : 'redo';
     resumeBtn.textContent = (showTotal > 0 ? '📋 继续爬取 (' + showDone + '/' + showTotal + ')' : '📋 重新爬取');
@@ -2624,8 +2628,11 @@ function renderMonitorDash(mid, pick) {
 
     var tog = document.getElementById('monBtnToggle');
     if (tog) tog.innerHTML = m.status === 'running' ? '🟡 暂停' : '🟢 启动';
+    var rn = document.getElementById('monBtnRunNow');
     var stp = document.getElementById('monBtnStop');
-    if (stp) stp.style.display = (m.status === 'stopped' || m.status === 'expired') ? 'none' : '';
+    var terminal = m.status === 'stopped' || m.status === 'expired';
+    if (rn) rn.style.display = terminal ? 'none' : '';   // M-6：终止/到期任务不可「立即一轮」
+    if (stp) stp.style.display = terminal ? 'none' : '';
 
     monApplyRound();
   });
