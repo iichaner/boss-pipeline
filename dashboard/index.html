@@ -2087,6 +2087,18 @@ async function pollCrawlStatus() {
   }
 }
 
+// 首启向导入口（P4）：失败一律放行，绝不把用户锁在向导外
+function maybeRedirectToWizard() {
+  fetch('api/onboarding/state', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (d && d.needs_onboarding && location.search.indexOf('skip_wizard') === -1) {
+        location.replace('/wizard.html');
+      }
+    })
+    .catch(function () { /* 静默放行 */ });
+}
+
 // === file:// 检测 ===
 if (window.location.protocol === 'file:') {
   document.getElementById('statusDot').className = 'status-dot error';
@@ -2094,6 +2106,7 @@ if (window.location.protocol === 'file:') {
   document.getElementById('connStatus').className = 'conn-badge disconnected';
   document.querySelector('.dashboard').innerHTML = '<div class="stat-card" style="text-align:center;padding:40px"><h2 style="color:var(--red)">❌ 无法连接</h2><p>请通过 HTTP 访问：</p><code style="display:block;background:var(--bg);padding:12px;margin:12px 0;border-radius:6px">http://localhost:8765</code></div>';
   } else {
+  maybeRedirectToWizard();
   loadSessions();
   pollProgress();
   pollJobs();
@@ -2784,13 +2797,14 @@ async function loadMonitorsAsync() { await loadMonitors(); }
   <div class="modal-content" style="max-width:680px;max-height:86vh;overflow-y:auto;text-align:left">
     <div style="display:flex;align-items:center;margin-bottom:14px">
       <h2 style="flex:1;font-size:18px;margin:0">📖 新手使用说明</h2>
+      <button class="btn-mini" onclick="location.href='/wizard.html'" style="margin-right:6px">🧭 重新配置</button>
       <button class="btn-mini" onclick="toggleUseGuide()">关闭</button>
     </div>
 
     <div style="background:var(--bg);border-radius:8px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.8">
       这是一个帮你<strong>自动完成「找岗位 → 判断合不合适 → 主动打招呼」</strong>的求职工具。
       全程在网页上点按钮完成，不用写代码。核心就三步：
-      <strong>① 爬取岗位　② AI 判断优先级　③ 自动打招呼</strong>。
+      <strong>① 爬取岗位　② 本地判定（零 token）　③ 自动打招呼</strong>。
     </div>
 
     <h3 style="font-size:14px;margin:16px 0 8px">🚀 第一次使用（跟着做，8 步找到工作）</h3>

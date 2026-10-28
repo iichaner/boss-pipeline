@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>首次配置向导 · Boss 直聘助手</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+    --text: #e4e6eb; --dim: #8b8d97; --accent: #3b82f6;
+    --green: #22c55e; --red: #ef4444; --yellow: #eab308;
+    --orange: #f97316; --purple: #a855f7;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'SF Pro', 'Helvetica Neue', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    padding: 28px 16px 60px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .head h1 { font-size: 20px; font-weight: 700; flex: 1; }
+  .head a { color: var(--dim); font-size: 12px; text-decoration: none; }
+  .head a:hover { color: var(--text); }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 18px; }
+
+  /* 进度 */
+  .progress { display: flex; gap: 6px; margin-bottom: 22px; }
+  .pstep {
+    flex: 1; padding: 8px 6px; text-align: center; font-size: 11px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--dim); cursor: default;
+  }
+  .pstep .num { display: block; font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+  .pstep.active { border-color: var(--orange); color: var(--orange); background: rgba(249,115,22,.12); }
+  .pstep.done { border-color: var(--green); color: var(--green); }
+  .pstep.done .num::after { content: ' ✓'; font-size: 11px; }
+
+  .panel {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 22px; margin-bottom: 16px;
+  }
+  .panel h2 { font-size: 16px; margin-bottom: 4px; }
+  .panel .hint { font-size: 12px; color: var(--dim); margin-bottom: 16px; line-height: 1.7; }
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .check { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .check .row { display: flex; align-items: center; gap: 8px; }
+  .check .mark { font-size: 14px; width: 20px; }
+  .check .label { font-size: 13px; font-weight: 600; flex: 1; }
+  .check .detail { font-size: 11px; color: var(--dim); margin: 4px 0 0 28px; word-break: break-all; }
+  .check .fix { font-size: 11px; margin: 6px 0 0 28px; }
+  .check .fix code {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 6px; color: var(--yellow); display: inline-block; word-break: break-all;
+  }
+
+  .group { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+  .group:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+  .group h3 { font-size: 13px; color: var(--accent); margin-bottom: 10px; }
+  .field { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .field label { width: 170px; font-size: 12px; color: var(--dim); flex-shrink: 0; }
+  .field input[type=text], .field input[type=number], .field select, .field input[type=url] {
+    flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 12px; min-width: 0;
+  }
+  .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+  .field input::placeholder { color: #555; }
+  .field .example { font-size: 10px; color: #555; width: 130px; flex-shrink: 0; }
+  .field.two input { flex: 0 1 110px; }
+  .field .sep { color: var(--dim); }
+  .dims .dim { display: grid; grid-template-columns: 150px 70px 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .dims .dim span { font-size: 12px; }
+  .dims .dim input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+  .dims .dim input:focus { outline: none; border-color: var(--accent); }
+
+  .errors { margin-top: 12px; }
+  .errors .e {
+    background: rgba(239,68,68,.12); border: 1px solid var(--red); color: #fecaca;
+    border-radius: 6px; padding: 8px 10px; font-size: 12px; margin-bottom: 6px;
+  }
+  .warn {
+    background: rgba(234,179,8,.12); border: 1px solid var(--yellow); color: #fde68a;
+    border-radius: 6px; padding: 8px 10px; font-size: 12px; margin: 10px 0;
+  }
+  .okbox {
+    background: rgba(34,197,94,.12); border: 1px solid var(--green); color: #bbf7d0;
+    border-radius: 6px; padding: 10px 12px; font-size: 12px; margin: 10px 0; line-height: 1.7;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--dim); font-weight: 500; font-size: 11px; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .badge.high { background: rgba(239,68,68,.2); color: #fca5a5; }
+  .badge.medium { background: rgba(234,179,8,.2); color: #fde68a; }
+  .badge.low { background: rgba(107,114,128,.2); color: #9ca3af; }
+
+  .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  button {
+    border: none; border-radius: 7px; padding: 9px 18px; font-size: 12px;
+    cursor: pointer; font-weight: 600;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { opacity: .88; }
+  .btn-ghost { background: transparent; color: var(--dim); border: 1px solid var(--border); }
+  .btn-ghost:hover { color: var(--text); }
+  .btn-green { background: var(--green); color: #052e16; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  .greet {
+    background: var(--bg); border: 1px dashed var(--border); border-radius: 8px;
+    padding: 12px; font-size: 13px; line-height: 1.8; color: var(--text);
+  }
+  .done-screen { text-align: center; padding: 40px 20px; }
+  .done-screen .big { font-size: 44px; margin-bottom: 12px; }
+  .done-screen h2 { font-size: 22px; margin-bottom: 10px; }
+  .done-screen p { color: var(--dim); font-size: 13px; line-height: 1.9; margin-bottom: 18px; }
+  .done-screen a.btn-primary { display: inline-block; padding: 10px 22px; border-radius: 7px; text-decoration: none; color: #fff; font-size: 13px; }
+  .muted { color: var(--dim); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>🧭 首次配置向导</h1>
+    <a href="/?skip_wizard=1">跳过向导，先去主界面 →</a>
+  </div>
+  <div class="sub">5 步完成配置；中途关掉再打开会从断点继续。所有数据只存本机 <code>~/.boss-pipeline</code>。</div>
+
+  <div class="progress" id="progress"></div>
+
+  <div id="doneView" class="panel" style="display:none">
+    <div class="done-screen">
+      <div class="big">✅</div>
+      <h2>已就绪</h2>
+      <p id="doneText">配置已完成，可以开始找工作了。</p>
+      <a class="btn-primary" href="/?skip_wizard=1">进入主界面</a>
+      <p style="margin-top:18px"><a href="/wizard.html" style="color:var(--dim);font-size:12px">重新配置</a></p>
+    </div>
+  </div>
+
+  <div id="wizardView">
+    <!-- 1 环境自检 -->
+    <div class="section" id="sec1">
+      <div class="panel">
+        <h2>第 1 步 · 环境自检</h2>
+        <div class="hint">检查 Python 依赖、浏览器、CDP 端口、登录状态与配置文件。缺项会给一条可复制的修复命令；除 Python 依赖外都不阻塞继续。</div>
+        <div id="envList"><div class="muted">检测中…</div></div>
+        <div class="actions">
+          <button class="btn-ghost" onclick="loadEnv()">重新检测</button>
+          <button class="btn-primary" id="envNext" onclick="step1Next()">继续</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2 偏好配置 -->
+    <div class="section" id="sec2">
+      <div class="panel">
+        <h2>第 2 步 · 偏好配置</h2>
+        <div class="hint">填 10~15 个问题即可。方括号里是示例，不是你的答案；不确定的先按示例改。带 * 为必填。</div>
+
+        <div class="group">
+          <h3>身份</h3>
+          <div class="field"><label>画像 id *</label><input type="text" id="f_profile_id" placeholder="me" value="me"><span class="example">小写字母/数字/-/_</span></div>
+          <div class="field"><label>怎么称呼你 *</label><input type="text" id="f_display_name" placeholder="例如：小林"></div>
+          <div class="field"><label>工作年限（年）*</label><input type="number" id="f_total_years" min="0" max="60" value="3"><span class="example">0–60</span></div>
+          <div class="field"><label>最高学历 *</label>
+            <select id="f_education">
+              <option>大专</option><option selected>本科</option><option>硕士</option><option>博士</option><option>其他</option>
+            </select>
+          </div>
+          <div class="field"><label>英语等级（0–5）</label><input type="number" id="f_english" min="0" max="5" value="3"><span class="example">3=可工作</span></div>
+        </div>
+
+        <div class="group">
+          <h3>目标</h3>
+          <div class="field"><label>目标岗位关键词 *</label><input type="text" id="f_roles" placeholder="运营, 项目"><span class="example">标题需命中其一</span></div>
+          <div class="field"><label>期望城市 *</label><input type="text" id="f_cities" placeholder="上海, 杭州"><span class="example">逗号分隔</span></div>
+          <div class="field two"><label>期望薪资（K）*</label>
+            <input type="number" id="f_salary_min" min="1" max="500" value="15"><span class="sep">–</span>
+            <input type="number" id="f_salary_max" min="1" max="500" value="30">
+          </div>
+          <div class="field"><label>接受远程</label><input type="checkbox" id="f_remote" style="flex:0 0 auto;width:16px;height:16px"></div>
+        </div>
+
+        <div class="group">
+          <h3>红线（可空）</h3>
+          <div class="field"><label>排除的标题关键词</label><input type="text" id="f_ex_titles" placeholder="例如：外包, 兼职"><span class="example">逗号分隔</span></div>
+          <div class="field"><label>排除的岗位类型</label><input type="text" id="f_ex_roles" placeholder="例如：电话销售"><span class="example">逗号分隔</span></div>
+          <div class="field"><label>排除的行业</label><input type="text" id="f_ex_industries" placeholder="例如：保险, 房产中介"><span class="example">逗号分隔</span></div>
+        </div>
+
+        <div class="group">
+          <h3>能力自评（0=不会，1=了解，2=能执行，3=能独立负责，4=能搭体系，5=能定战略）</h3>
+          <div class="hint">至少 3 个维度自评 ≥1 且各填 1 个以上关键词；否则样例判定会全空。关键词用逗号分隔。</div>
+          <div class="dims" id="dimsWrap"></div>
+        </div>
+
+        <div class="errors" id="step2Errors"></div>
+        <div class="actions">
+          <button class="btn-ghost" onclick="go(1)">上一步</button>
+          <button class="btn-primary" id="step2Next" onclick="step2Next()">保存并继续</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 试判定 -->
+    <div class="section" id="sec3">
+      <div class="panel">
+        <h2>第 3 步 · 试判定</h2>
+        <div class="hint">用 3 条内置样例 JD 跑一遍本地判定（零 token）。看看档位是否符合直觉；不满意可以回第 2 步改关键词或自评。</div>
+        <div id="previewBox"><div class="muted">运行中…</div></div>
+        <div class="actions">
+          <button class="btn-ghost" onclick="go(2)">上一步</button>
+          <button class="btn-ghost" onclick="runPreview()">重新试判定</button>
+          <button class="btn-primary" id="previewNext" onclick="step3Next()">继续</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 试爬取 -->
+    <div class="section" id="sec4">
+      <div class="panel">
+        <h2>第 4 步 · 试爬取（可选）</h2>
+        <div class="hint">需要先在主界面点「🚀 启动浏览器」并扫码登录。粘贴 Boss 列表页 URL 后，这里只会爬 <strong>5 条</strong>试水；不想现在爬可直接跳过。</div>
+        <div class="field"><label>列表页 URL</label><input type="url" id="f_crawl_url" placeholder="https://www.zhipin.com/web/geek/jobs?..."></div>
+        <div id="crawlMsg"></div>
+        <div class="actions">
+          <button class="btn-ghost" onclick="go(3)">上一步</button>
+          <button class="btn-ghost" onclick="step4Skip()">跳过这步</button>
+          <button class="btn-primary" id="crawlBtn" onclick="step4Crawl()">试爬 5 条</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5 dry-run -->
+    <div class="section" id="sec5">
+      <div class="panel">
+        <h2>第 5 步 · 试打招呼（dry-run）</h2>
+        <div class="hint">这一步<strong>只生成计划，不会真实发送任何消息</strong>。确认无误后点「完成配置」。</div>
+        <div id="dryBox"><div class="muted">生成 dry-run 计划…</div></div>
+        <div class="actions">
+          <button class="btn-ghost" onclick="go(4)">上一步</button>
+          <button class="btn-green" id="finishBtn" onclick="finish()">完成配置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var DIMS = ['专业能力', '项目与流程管理', '数据能力', '沟通协作', '团队管理', '行业知识'];
+var STEP_LABELS = ['环境自检', '偏好配置', '试判定', '试爬取', '试打招呼'];
+var stateData = null;
+var envData = null;
+var current = 1;
+var lastPreview = null;
+
+function api(path, body) {
+  var opt = { cache: 'no-store', headers: {} };
+  if (body !== undefined) {
+    opt.method = 'POST';
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  return fetch(path, opt).then(function (r) {
+    return r.json().then(function (d) { return { ok: r.ok, data: d }; })
+      .catch(function () { return { ok: false, data: { error: '响应不是 JSON' } }; });
+  }).catch(function (e) {
+    return { ok: false, data: { error: String(e) } };
+  });
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function renderProgress() {
+  var h = '';
+  for (var i = 1; i <= 5; i++) {
+    var cls = i === current ? 'active' : (i < current ? 'done' : '');
+    h += '<div class="pstep ' + cls + '"><span class="num">' + i + '</span>' + STEP_LABELS[i - 1] + '</div>';
+  }
+  document.getElementById('progress').innerHTML = h;
+}
+
+function go(step) {
+  current = Math.max(1, Math.min(5, step));
+  renderProgress();
+  for (var i = 1; i <= 5; i++) {
+    document.getElementById('sec' + i).className = 'section' + (i === current ? ' active' : '');
+  }
+  if (current === 1) loadEnv();
+  if (current === 3) runPreview();
+  if (current === 4 && !envData) loadEnv();
+  if (current === 5) {
+    if (!lastPreview) { runPreview().then(function () { buildDryRun(); }); }
+    else buildDryRun();
+  }
+  window.scrollTo(0, 0);
+}
+
+function init() {
+  api('api/onboarding/state').then(function (res) {
+    var d = res.data || {};
+    stateData = d;
+    if (d.completed && !d.needs_onboarding) {
+      showDone(d.profile_id);
+      return;
+    }
+    if (d.answers) fillForm(d.answers);
+    go(d.step || 1);
+  });
+}
+
+function showDone(pid) {
+  document.getElementById('wizardView').style.display = 'none';
+  var v = document.getElementById('doneView');
+  v.style.display = 'block';
+  document.getElementById('progress').style.display = 'none';
+  document.getElementById('doneText').textContent =
+    '配置已完成（画像：' + (pid || '当前') + '）。下一步：回到主界面，粘贴 Boss 列表页 URL 开始爬取。';
+}
+
+/* ── 步骤 1 ── */
+function loadEnv() {
+  var box = document.getElementById('envList');
+  box.innerHTML = '<div class="muted">检测中…</div>';
+  api('api/onboarding/env').then(function (res) {
+    envData = res.data || {};
+    var checks = envData.checks || [];
+    if (!checks.length) {
+      box.innerHTML = '<div class="warn">环境检测接口不可用：' + esc((envData.error || '未知错误')) + '。可继续，但部分功能可能不可用。</div>';
+      return;
+    }
+    var h = '';
+    checks.forEach(function (c) {
+      var mark = c.ok ? '✅' : (c.blocking ? '❌' : '⚠️');
+      h += '<div class="check"><div class="row"><span class="mark">' + mark + '</span>' +
+        '<span class="label">' + esc(c.label) + '</span></div>' +
+        '<div class="detail">' + esc(c.detail) + '</div>';
+      if (!c.ok && c.fix_cmd) {
+        h += '<div class="fix">修复：<code>' + esc(c.fix_cmd) + '</code></div>';
+      }
+      h += '</div>';
+    });
+    var s = envData.summary || {};
+    h += '<div class="muted" style="margin-top:8px">' + (s.passed || 0) + '/' + (s.total || checks.length) + ' 项通过' +
+      (s.blocking_failed ? '（有阻塞项：请先装 Python 依赖）' : '') + '</div>';
+    box.innerHTML = h;
+    document.getElementById('envNext').disabled = !!(s.blocking_failed);
+  });
+}
+
+function step1Next() {
+  api('api/onboarding/answer', { step: 1, answers: {} }).then(function (res) {
+    if (!res.data || !res.data.ok) return showErrors(1, res.data);
+    go(2);
+  });
+}
+
+/* ── 步骤 2 ── */
+function buildDims(answers) {
+  var dims = (answers && answers.capabilities && answers.capabilities.dimensions) || {};
+  var kws = (answers && answers.dimension_keywords) || {};
+  var defs = (answers && answers.dimension_definitions) || {};
+  var h = '';
+  DIMS.forEach(function (name, i) {
+    var v = dims[name] != null ? dims[name] : 0;
+    var k = (kws[name] || []).join(', ');
+    h += '<div class="dim">' +
+      '<span>' + esc(name) + '</span>' +
+      '<select data-dim="' + i + '" data-role="level">' +
+        [0,1,2,3,4,5].map(function (n) { return '<option value="' + n + '"' + (Number(v) === n ? ' selected' : '') + '>' + n + '</option>'; }).join('') +
+      '</select>' +
+      '<input type="text" data-dim="' + i + '" data-role="kw" placeholder="关键词，逗号分隔（例：流程, 复盘, 看板）" value="' + esc(k) + '">' +
+    '</div>';
+  });
+  document.getElementById('dimsWrap').innerHTML = h;
+}
+
+function fillForm(a) {
+  if (!a) { buildDims({}); return; }
+  var ident = a.identity || {}, tgt = a.targets || {}, sal = tgt.salary || {};
+  document.getElementById('f_profile_id').value = a.profile_id || 'me';
+  document.getElementById('f_display_name').value = ident.display_name || '';
+  document.getElementById('f_total_years').value = ident.total_years != null ? ident.total_years : 3;
+  document.getElementById('f_education').value = ident.education || '本科';
+  document.getElementById('f_english').value = (ident.languages || {}).英语 != null ? ident.languages.英语 : 3;
+  document.getElementById('f_roles').value = (tgt.roles || []).join(', ');
+  document.getElementById('f_cities').value = (tgt.cities || []).join(', ');
+  document.getElementById('f_salary_min').value = sal.min_k != null ? sal.min_k : 15;
+  document.getElementById('f_salary_max').value = sal.max_k != null ? sal.max_k : 30;
+  document.getElementById('f_remote').checked = !!tgt.accept_remote;
+  document.getElementById('f_ex_titles').value = (tgt.exclude_title_keywords || []).join(', ');
+  document.getElementById('f_ex_roles').value = (tgt.exclude_role_keywords || []).join(', ');
+  var flt = a.filters || {};
+  document.getElementById('f_ex_industries').value = (flt.exclude_industries || []).join(', ');
+  buildDims(a);
+}
+
+function splitList(s) {
+  return String(s || '').split(/[,，、;；]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+}
+
+function collectStep2() {
+  var dims = {}, kws = {}, defs = {};
+  var selects = document.querySelectorAll('#dimsWrap select[data-role=level]');
+  var inputs = document.querySelectorAll('#dimsWrap input[data-role=kw]');
+  for (var i = 0; i < selects.length; i++) {
+    var name = DIMS[i];
+    var lv = parseInt(selects[i].value, 10) || 0;
+    var words = splitList(inputs[i] ? inputs[i].value : '');
+    if (lv > 0 && words.length) {
+      dims[name] = lv;
+      kws[name] = words;
+    }
+  }
+  var eng = parseInt(document.getElementById('f_english').value, 10);
+  if (isNaN(eng)) eng = 0;
+  return {
+    profile_id: document.getElementById('f_profile_id').value.trim().toLowerCase() || 'me',
+    identity: {
+      display_name: document.getElementById('f_display_name').value.trim(),
+      total_years: Number(document.getElementById('f_total_years').value || 0),
+      education: document.getElementById('f_education').value,
+      languages: { '英语': eng },
+      certifications: []
+    },
+    targets: {
+      roles: splitList(document.getElementById('f_roles').value),
+      cities: splitList(document.getElementById('f_cities').value),
+      salary: {
+        min_k: Number(document.getElementById('f_salary_min').value || 0),
+        max_k: Number(document.getElementById('f_salary_max').value || 0)
+      },
+      accept_remote: document.getElementById('f_remote').checked,
+      exclude_title_keywords: splitList(document.getElementById('f_ex_titles').value),
+      exclude_role_keywords: splitList(document.getElementById('f_ex_roles').value)
+    },
+    filters: {
+      exclude_industries: splitList(document.getElementById('f_ex_industries').value),
+      domain_blacklist: []
+    },
+    experience: { industries: [] },
+    capabilities: { dimensions: dims },
+    dimension_keywords: kws,
+    dimension_definitions: defs,
+    engine: {}
+  };
+}
+
+function step2Next() {
+  var btn = document.getElementById('step2Next');
+  btn.disabled = true;
+  var answers = collectStep2();
+  api('api/onboarding/answer', { step: 2, answers: answers }).then(function (res) {
+    btn.disabled = false;
+    if (!res.data || !res.data.ok) return showErrors(2, res.data);
+    document.getElementById('step2Errors').innerHTML = '';
+    go(3);
+  });
+}
+
+function showErrors(step, data) {
+  var box = document.getElementById('step2Errors');
+  var errs = (data && data.errors) || [(data && data.error) || '未知错误'];
+  if (step === 2 && box) {
+    box.innerHTML = errs.map(function (e) { return '<div class="e">' + esc(e) + '</div>'; }).join('');
+    box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } else {
+    alert(errs.join('\n'));
+  }
+}
+
+/* ── 步骤 3 ── */
+function runPreview() {
+  var box = document.getElementById('previewBox');
+  box.innerHTML = '<div class="muted">运行中…</div>';
+  return api('api/onboarding/preview', {}).then(function (res) {
+    var d = res.data || {};
+    if (!res.ok || (d.errors && d.errors.length)) {
+      box.innerHTML = '<div class="warn">暂不能试判定：' + esc((d.errors || [d.error || '未知错误']).join('；')) + '</div>';
+      return;
+    }
+    lastPreview = d;
+    var h = '<table><thead><tr><th>样例岗位</th><th>档位</th><th>匹配度</th><th>命中维度</th><th>说明 / 硬过滤</th></tr></thead><tbody>';
+    (d.items || []).forEach(function (it) {
+      var lv = it.level || 'low';
+      var lvText = { high: '高', medium: '中', low: '低' }[lv] || lv;
+      h += '<tr><td>' + esc(it.jd_title) + '</td>' +
+        '<td><span class="badge ' + esc(lv) + '">' + lvText + '</span></td>' +
+        '<td>' + (it.match_pct != null ? esc(it.match_pct) + '%' : '—') + '</td>' +
+        '<td>' + (it.filtered_by ? '—' : esc((it.hits || []).join('、') || '无')) + '</td>' +
+        '<td>' + (it.filtered_by ? '硬过滤：' + esc(it.filtered_by) : esc(it.reason || '')) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    if (!d.spread_ok) {
+      h += '<div class="warn">3 条样例只出现 1 种档位。可以回第 2 步补关键词/调整自评，让区分度更明显；也可以继续。</div>';
+    } else {
+      h += '<div class="okbox">档位分布：' + esc((d.levels || []).join('、')) + ' —— 至少 2 种档位，判定有区分度。</div>';
+    }
+    box.innerHTML = h;
+  });
+}
+
+function step3Next() {
+  api('api/onboarding/answer', { step: 3, answers: {} }).then(function (res) {
+    if (!res.data || !res.data.ok) return showErrors(3, res.data);
+    go(4);
+  });
+}
+
+/* ── 步骤 4 ── */
+function step4Crawl() {
+  var url = document.getElementById('f_crawl_url').value.trim();
+  var box = document.getElementById('crawlMsg');
+  if (!url) { box.innerHTML = '<div class="warn">先粘贴列表页 URL，或点「跳过这步」。</div>'; return; }
+  var work = (envData && envData.summary && envData.summary.work_root) || '';
+  if (!work) { box.innerHTML = '<div class="warn">还拿不到工作目录，请先回第 1 步重新检测。</div>'; return; }
+  var d = new Date();
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  var stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  var name = stamp + '-onboarding';
+  var payload = {
+    url: url,
+    max_jobs: 5,
+    session_name: name,
+    output_dir: work + '/' + name + '/01_raw'
+  };
+  document.getElementById('crawlBtn').disabled = true;
+  box.innerHTML = '<div class="muted">已提交爬取（最多 5 条）…</div>';
+  api('api/crawl/start', payload).then(function (res) {
+    document.getElementById('crawlBtn').disabled = false;
+    var ok = res.ok && res.data && !res.data.error;
+    if (!ok) {
+      box.innerHTML = '<div class="warn">爬取没起来：' + esc((res.data && (res.data.error || res.data.message)) || '检查浏览器是否已启动并登录') + '。可以跳过这步，稍后在主界面再爬。</div>';
+      return;
+    }
+    box.innerHTML = '<div class="okbox">已开始试爬（最多 5 条），结果会出现在主界面。你可以直接继续。</div>';
+    api('api/onboarding/answer', { step: 4, answers: { url: url } }).then(function () { go(5); });
+  });
+}
+
+function step4Skip() {
+  api('api/onboarding/answer', { step: 4, answers: { skipped: true } }).then(function (res) {
+    if (!res.data || !res.data.ok) return showErrors(4, res.data);
+    go(5);
+  });
+}
+
+/* ── 步骤 5 ── */
+function buildDryRun() {
+  var box = document.getElementById('dryBox');
+  var items = (lastPreview && lastPreview.items) || [];
+  var targets = items.filter(function (i) { return i.level === 'high' || i.level === 'medium'; });
+  var msg = '您好，看到贵司在招{岗位}，我的经历与岗位要求比较匹配，方便的话想和您进一步沟通，谢谢！';
+  var h = '<div class="okbox">dry-run：本步骤只生成计划，<strong>不会真实发送</strong>。后端还会再校验 dry_run=True。</div>';
+  h += '<div style="margin:10px 0 6px;font-size:12px;color:var(--dim)">将向 ' + targets.length + ' 条高/中优先级岗位打招呼：</div>';
+  if (targets.length) {
+    h += '<table><thead><tr><th>样例岗位</th><th>档位</th></tr></thead><tbody>';
+    targets.forEach(function (t) {
+      var lvText = { high: '高', medium: '中' }[t.level] || t.level;
+      h += '<tr><td>' + esc(t.jd_title) + '</td><td><span class="badge ' + esc(t.level) + '">' + lvText + '</span></td></tr>';
+    });
+    h += '</tbody></table>';
+  } else {
+    h += '<div class="warn">当前没有高/中优先级样例；dry-run 计划为空，但仍可完成配置。</div>';
+  }
+  h += '<div style="margin:14px 0 6px;font-size:12px;color:var(--dim)">开场白预览（不会发送）</div>';
+  h += '<div class="greet">' + esc(msg) + '</div>';
+  box.innerHTML = h;
+}
+
+function finish() {
+  var btn = document.getElementById('finishBtn');
+  btn.disabled = true;
+  api('api/onboarding/answer', { step: 5, answers: { dry_run: true } }).then(function (res) {
+    if (!res.data || !res.data.ok) {
+      btn.disabled = false;
+      return showErrors(5, res.data);
+    }
+    api('api/onboarding/commit', { finalize: true }).then(function (r) {
+      btn.disabled = false;
+      var d = r.data || {};
+      if (!r.ok || !d.ok) {
+        return showErrors(5, { errors: d.errors || [d.error || '提交失败'] });
+      }
+      showDone(d.profile_id);
+    });
+  });
+}
+
+buildDims({});
+init();
+</script>
+</body>
+</html>

@@ -45,6 +45,10 @@ DEFAULT_HOME = Path('~/.boss-pipeline')
 CONFIG_NAME = 'config.json'
 PROFILE_SCHEMA_VERSION = 2
 
+#: 统一的「已发布」标记。迁移（migrate）与向导（onboarding）都写这一个文件；
+#: 读路径同时兼容 P2 时期的 migration.json（只读回退，不产生副作用）。
+PUBLISHED_NAME = 'published.json'
+
 SKILL_PIPELINE = 'boss-pipeline'
 SKILL_MATCHER = 'job-match-priority'
 SKILL_CRAWLER = 'boss-resume-crawler'
@@ -168,7 +172,12 @@ def home(create: bool = False, cli_home=None):
         p = _expand(env)
         if p.is_dir():
             return p
-        # 显式指定就不静默回退（防止「以为在改 A，实际改 B」）
+        if create:
+            # 首启向导可显式创建；显式指定仍不静默回退（防止「以为在改 A，实际改 B」）
+            p.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(p, 0o700)
+            return p
         raise ConfigError(
             f'{ENV_HOME} 指向的目录不存在：{p}\n'
             f'已尝试：{p}\n'
@@ -356,6 +365,39 @@ def touch_last_used(profile_id=None) -> None:
         pass
 
 
+def published_path(profile_id=None) -> Path:
+    """统一发布标记 published.json 的路径（home 模式）。"""
+    root = home()
+    if root is None:
+        raise NeedOnboarding('未初始化 boss-pipeline，请先运行 onboard.py 或 migrate_profile.py')
+    return root / 'profiles' / resolve_profile_id(profile_id) / PUBLISHED_NAME
+
+
+def is_published(profile_id=None) -> bool:
+    """画像是否已发布：published.json 为准；兼容 P2 的 migration.json 回退。"""
+    try:
+        d = published_path(profile_id).parent
+    except Exception:
+        return False
+    return (d / PUBLISHED_NAME).is_file() or (d / 'migration.json').is_file()
+
+
+def write_published(profile_id=None, source: str = 'onboarding', published_at: str = None) -> Path:
+    """写统一发布标记。source = migrate | onboarding。"""
+    if source not in ('migrate', 'onboarding'):
+        raise ConfigError(f'非法发布来源：{source!r}')
+    pid = resolve_profile_id(profile_id)
+    p = profiles_dir() / pid / PUBLISHED_NAME
+    text = json.dumps({
+        'schema_version': 1,
+        'profile_id': pid,
+        'published_at': published_at or _now_iso(),
+        'source': source,
+    }, ensure_ascii=False, indent=2) + '\n'
+    atomic_write(p, text, mode=0o600)
+    return p
+
+
 def profile_path(profile_id=None, require_published: bool = True) -> Path:
     """home 模式 → profiles/<id>/profile.json；legacy 模式 → skill 内旧画像。"""
     root = home()
@@ -369,11 +411,13 @@ def profile_path(profile_id=None, require_published: bool = True) -> Path:
             f'画像 {pid} 尚未生成 profile.json，请运行 '
             f'python3 scripts/migrate_profile.py --profile {pid}'
         )
-    if require_published and not (d / 'migration.json').is_file():
-        raise ProfileNotPublished(
-            f'画像 {pid} 未完成发布（缺少 migration.json），请重跑 '
-            f'python3 scripts/migrate_profile.py --profile {pid}'
-        )
+    if require_published:
+        # 统一标记：published.json（迁移与向导都写）；migration.json 仅作 P2 兼容回退
+        if not (d / PUBLISHED_NAME).is_file() and not (d / 'migration.json').is_file():
+            raise ProfileNotPublished(
+                f'画像 {pid} 未完成发布（缺少 published.json），请重跑 '
+                f'python3 scripts/migrate_profile.py --profile {pid} 或重新走向导'
+            )
     return p
 
 

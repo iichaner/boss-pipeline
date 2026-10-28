@@ -379,6 +379,8 @@ class Migrator:
         with contextlib.suppress(FileNotFoundError):
             self.migration_json.unlink()
         with contextlib.suppress(FileNotFoundError):
+            (self.profile_dir / cp.PUBLISHED_NAME).unlink()
+        with contextlib.suppress(FileNotFoundError):
             self.sentinel.unlink()
         print(f'[rollback] 备份：{bdir.name}')
         print(f'[rollback] 恢复：{", ".join(restored) or "无"}')
@@ -417,6 +419,14 @@ class Migrator:
             rec = json.loads(self.migration_json.read_text(encoding='utf-8'))
             if rec.get('source_sha256') == source_hash and \
                     (self.profile_dir / 'profile.json').is_file():
+                # 统一发布标记（P4）：老迁移产物补写 published.json，幂等无副作用
+                if not (self.profile_dir / cp.PUBLISHED_NAME).is_file():
+                    try:
+                        cp.write_published(self.pid, source='migrate',
+                                           published_at=rec.get('migrated_at') or _now())
+                        print(f'[mark] published.json 已补写（source=migrate）')
+                    except Exception as e:
+                        print(f'[warn] published.json 写入失败：{e}（画像仍可读，migration.json 回退生效）')
                 print('[skip] 已迁移且源未变更（幂等跳过）')
                 return self._verify(self._load_payload(), legacy_profile, frozen, literals)
             print('[detect] 源已变更，将新建备份并重新迁移')
@@ -508,6 +518,12 @@ class Migrator:
         with contextlib.suppress(OSError):
             os.chmod(self.migration_json, 0o600)
 
+        # 统一发布标记（P4）：向导与迁移共用同一个「已发布」判据
+        try:
+            cp.write_published(self.pid, source='migrate')
+        except Exception as e:
+            print(f'[warn] published.json 写入失败：{e}（migration.json 回退仍可读）')
+
         # config.json（active_profile / work_root / onboarding.completed）
         self._write_config()
         (self.profile_dir / 'state').mkdir(parents=True, exist_ok=True)
@@ -531,6 +547,8 @@ class Migrator:
                 target.unlink()
         with contextlib.suppress(FileNotFoundError):
             self.migration_json.unlink()
+        with contextlib.suppress(FileNotFoundError):
+            (self.profile_dir / cp.PUBLISHED_NAME).unlink()
         with contextlib.suppress(FileNotFoundError):
             self.sentinel.unlink()
         return EXIT_OK

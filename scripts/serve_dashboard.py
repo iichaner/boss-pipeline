@@ -72,6 +72,20 @@ except Exception as e:
     MONITOR_MODULES_AVAILABLE = False
     print(f"[serve_dashboard] 长期监控模块加载失败: {e}")
 
+# ── Onboarding 向导 API（P4）──────────────────────────────
+# 独立 Mixin：加载失败只降级为 503，不影响主站任何既有分支。
+try:
+    from onboarding_api import OnboardingMixin
+except Exception as e:
+    class OnboardingMixin:  # noqa: F811 - 降级桩
+        def _onb_unavailable(self, data=None):
+            return self._json_response(
+                {'ok': False, 'error': 'onboarding unavailable', 'detail': str(e)}, 503)
+
+        _onb_state = _onb_env = _onb_answer = _onb_preview = _onb_commit = _onb_reset = _onb_unavailable
+
+    print(f"[serve_dashboard] onboarding 模块加载失败（向导不可用，主站正常）: {e}")
+
 
 class CrawlManager:
     """管理爬取/打招呼子进程。"""
@@ -569,7 +583,7 @@ def _public_active(a):
     }
 
 
-class DashboardHandler(http.server.SimpleHTTPRequestHandler):
+class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
     """自定义 HTTP Handler：静态文件 + JSON 代理 + CSV 查询。"""
 
     output_dir = None        # 当前 session 的 01_raw/ 目录
@@ -997,6 +1011,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == 'api/monitor/round':
             return self._mon_round_detail(qs)
 
+        # ── Onboarding 向导（P4）──
+        if path == 'api/onboarding/state':
+            return self._onb_state()
+        if path == 'api/onboarding/env':
+            return self._onb_env()
+
         # / → index.html（no-cache 防浏览器缓存旧版）
         if path in ('', 'index.html'):
             return self._serve_file(os.path.join(DASHBOARD_DIR, 'index.html'), 'text/html', cache=False)
@@ -1134,6 +1154,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return self._mon_action(data, path.split('/')[-1])
         if path == 'api/monitor/folder':
             return self._mon_folder(data)
+
+        # ── Onboarding 向导（P4）──
+        if path == 'api/onboarding/answer':
+            return self._onb_answer(data)
+        if path == 'api/onboarding/preview':
+            return self._onb_preview(data)
+        if path == 'api/onboarding/commit':
+            return self._onb_commit(data)
+        if path == 'api/onboarding/reset':
+            return self._onb_reset(data)
 
         # /navigate → CDP 跳转
         if path == 'navigate':
