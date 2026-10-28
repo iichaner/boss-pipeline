@@ -104,7 +104,11 @@ def _matcher_py() -> Path:
 
 
 def extract_matcher_literals(src: str = None) -> dict:
-    """从 matcher.py 源码 AST 提取 K11/K12/K13/K15 的字面量（唯一真源）。"""
+    """从 matcher.py 源码 AST 提取 K11/K12/K13/K15 的字面量。
+
+    P3 起这些字面量已外提到 prefs（matcher.py 不再内联），此时返回 None；
+    调用方改用「prefs 自证 + diff 门禁」，见 check_i2。
+    """
     if src is None:
         p = _matcher_py()
         if not p.is_file():
@@ -122,12 +126,25 @@ def extract_matcher_literals(src: str = None) -> dict:
                         pass
     missing = wanted - set(found)
     if missing:
-        raise RuntimeError('E-TRANSFORM 未能从 matcher.py 提取：' + ', '.join(sorted(missing)))
+        # K11–K15 已在 P3 外提（源码里没有内联字面量）→ 由 prefs 承担真源
+        return None
     return {
         'strong_keywords': list(found['strong_hr_keywords']),
         'senior_title_keywords': list(found['gm_keywords']),
         'core_dimensions': sorted(found['core_dims']),
         'dimension_aliases': dict(found['ID_TO_NAME']),
+    }
+
+
+def literals_from_prefs(prefs: dict) -> dict:
+    """外提后的 K11–K15 取值来源：已落盘的 prefs.yaml（用于 diff 门禁与迁移记录）。"""
+    rules = (prefs or {}).get('rules') or {}
+    tb = rules.get('title_bias') or {}
+    return {
+        'strong_keywords': list(tb.get('strong_keywords') or []),
+        'senior_title_keywords': list(tb.get('senior_title_keywords') or []),
+        'core_dimensions': sorted(tb.get('core_dimensions') or []),
+        'dimension_aliases': dict(rules.get('dimension_aliases') or {}),
     }
 
 
@@ -137,8 +154,11 @@ def _quality_gate_source_ok(src: str = None) -> bool:
         if not p.is_file():
             return False
         src = p.read_text(encoding='utf-8')
-    checks = (r'len\(items\)\s*<\s*4', r'len\(items\)\s*<\s*3', r'len\(unique_dims\)\s*<=\s*1')
-    return all(re.search(c, src) for c in checks)
+    # P3（K14）后闸门改为读 prefs.rules.quality_gates；两种形态都认，防源码悄悄漂移
+    legacy = (r'len\(items\)\s*<\s*4', r'len\(items\)\s*<\s*3', r'len\(unique_dims\)\s*<=\s*1')
+    modern = (r'min_items_for_high', r'min_items_for_medium', r'min_distinct_dims_for_high')
+    groups = (legacy, modern)
+    return any(all(re.search(c, src) for c in g) for g in groups)
 
 
 # ── 配置拆分（K01–K10）───────────────────────────────────
@@ -162,12 +182,12 @@ def split_config(match_cfg: dict, literals: dict) -> dict:
             ov['ai_boost'] = {'enabled': False, 'scope': 'title'}
 
     rules['title_bias'] = {
-        'strong_keywords': literals['strong_keywords'],
-        'senior_title_keywords': literals['senior_title_keywords'],
-        'core_dimensions': literals['core_dimensions'],
+        'strong_keywords': (literals or {}).get('strong_keywords') or [],
+        'senior_title_keywords': (literals or {}).get('senior_title_keywords') or [],
+        'core_dimensions': (literals or {}).get('core_dimensions') or [],
     }
     rules['quality_gates'] = dict(QUALITY_GATES)
-    rules['dimension_aliases'] = literals['dimension_aliases']
+    rules['dimension_aliases'] = (literals or {}).get('dimension_aliases') or {}
 
     return {
         'schema_version': SCHEMA_VERSION,
@@ -186,7 +206,12 @@ def check_i1(profile_v2: dict, legacy_source: dict) -> tuple:
 
 
 def check_i2(prefs: dict, effective: dict, frozen: dict, literals: dict) -> tuple:
-    """I2：effective_config(ii) == 冻结的 match_config 快照 + K11–K15 外提值一致。"""
+    """I2：effective_config(ii) == 冻结的 match_config 快照 + K11–K15 外提值一致。
+
+    literals=None 表示 P3 后 matcher.py 已无内联字面量（外提到 prefs）；
+    此时改为「prefs 自身完整性」自证（词表非空、别名表可读），
+    真正的行为等价保证由 diff_judgment.py（逐行七列）负责。
+    """
     problems = []
 
     def _cmp(key, a, b):
@@ -213,16 +238,27 @@ def check_i2(prefs: dict, effective: dict, frozen: dict, literals: dict) -> tupl
             .get('enabled') is not False):
         problems.append('rules.override_signals.ai_boost.enabled 必须为 false（T-1）')
 
-    # K11–K15 外提值必须与 matcher.py 字面量一致
+    # K11–K15 外提值：literals 来自 matcher.py 字面量（旧路径）；None 则自证
     tb = (prefs.get('rules') or {}).get('title_bias') or {}
-    if tb.get('strong_keywords') != literals['strong_keywords']:
-        problems.append('rules.title_bias.strong_keywords 与 matcher.py 字面量不一致')
-    if tb.get('senior_title_keywords') != literals['senior_title_keywords']:
-        problems.append('rules.title_bias.senior_title_keywords 与 matcher.py 字面量不一致')
-    if set(tb.get('core_dimensions') or []) != set(literals['core_dimensions']):
-        problems.append('rules.title_bias.core_dimensions 与 matcher.py 字面量不一致')
-    if (prefs.get('rules') or {}).get('dimension_aliases') != literals['dimension_aliases']:
-        problems.append('rules.dimension_aliases 与 matcher.py ID_TO_NAME 不一致')
+    aliases = (prefs.get('rules') or {}).get('dimension_aliases')
+    if literals is None:
+        if not isinstance(tb.get('strong_keywords'), list) or not tb.get('strong_keywords'):
+            problems.append('rules.title_bias.strong_keywords 缺失或为空（外提后必须显式保留）')
+        if not isinstance(tb.get('senior_title_keywords'), list):
+            problems.append('rules.title_bias.senior_title_keywords 缺失')
+        if not isinstance(tb.get('core_dimensions'), list):
+            problems.append('rules.title_bias.core_dimensions 缺失')
+        if not isinstance(aliases, dict):
+            problems.append('rules.dimension_aliases 缺失')
+    else:
+        if tb.get('strong_keywords') != literals['strong_keywords']:
+            problems.append('rules.title_bias.strong_keywords 与 matcher.py 字面量不一致')
+        if tb.get('senior_title_keywords') != literals['senior_title_keywords']:
+            problems.append('rules.title_bias.senior_title_keywords 与 matcher.py 字面量不一致')
+        if set(tb.get('core_dimensions') or []) != set(literals['core_dimensions']):
+            problems.append('rules.title_bias.core_dimensions 与 matcher.py 字面量不一致')
+        if aliases != literals['dimension_aliases']:
+            problems.append('rules.dimension_aliases 与 matcher.py ID_TO_NAME 不一致')
     if (prefs.get('rules') or {}).get('quality_gates') != QUALITY_GATES:
         problems.append('rules.quality_gates 与基线值不一致')
     if not _quality_gate_source_ok():
@@ -407,6 +443,12 @@ class Migrator:
         profile_v2 = pa.to_v2(legacy_profile, self.pid,
                               created_at=created_at or _now(), updated_at=_now())
         match_cfg = cp.read_yaml(sources['match_config'])
+        # K11–K15 已外提：源码无字面量时，沿用既有 prefs 里的值（重迁移不得清空词表）
+        if literals is None:
+            existing_prefs = self.profile_dir / 'prefs.yaml'
+            if existing_prefs.is_file():
+                with contextlib.suppress(Exception):
+                    literals = literals_from_prefs(cp.read_yaml(existing_prefs))
         prefs = split_config(match_cfg, literals)
         taxonomy_text = sources['taxonomy'].read_text(encoding='utf-8')
 
@@ -461,7 +503,7 @@ class Migrator:
             'source_sha256': source_hash,
             'source_files': {k: str(v) for k, v in sources.items()},
             'backup_dir': str(bdir),
-            'matcher_version': _matcher_version(literals),
+            'matcher_version': _matcher_version(literals or literals_from_prefs(prefs)),
         }), encoding='utf-8')
         with contextlib.suppress(OSError):
             os.chmod(self.migration_json, 0o600)
@@ -513,6 +555,8 @@ class Migrator:
             rc = EXIT_VALIDATE
 
         # I2 用真实合并链路（与运行时同一函数），而不是内存对象
+        if literals is None:
+            print('[I2] K11–K15 已外提到 prefs（matcher.py 无内联字面量），改由 prefs 自证')
         effective = cp.effective_config(self.pid)
         ok_i2, problems = check_i2(prefs, effective, frozen, literals)
         print(f'[I2] effective_config({self.pid}) == match_config_20261028     '
@@ -544,11 +588,12 @@ class Migrator:
 
 
 def _matcher_version(literals: dict) -> dict:
+    literals = literals or {}
     return {
-        'strong_keywords': len(literals['strong_keywords']),
-        'senior_title_keywords': len(literals['senior_title_keywords']),
-        'core_dimensions': len(literals['core_dimensions']),
-        'dimension_aliases': len(literals['dimension_aliases']),
+        'strong_keywords': len(literals.get('strong_keywords') or []),
+        'senior_title_keywords': len(literals.get('senior_title_keywords') or []),
+        'core_dimensions': len(literals.get('core_dimensions') or []),
+        'dimension_aliases': len(literals.get('dimension_aliases') or {}),
     }
 
 

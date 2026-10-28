@@ -127,8 +127,8 @@ zhizhi 的 sessionKey（用于 `sessions_send`）：
 ```
 main → zhizhi:
 【JD 匹配任务】
-raw_csv: /Users/ii/.../01_raw/jobs_data_20260805.csv
-result_dir: /Users/ii/.../02_result/
+raw_csv: $WORK_DIR/01_raw/jobs_data_20260805.csv
+result_dir: $WORK_DIR/02_result/
 candidate_config: last
 
 请执行 job-match-priority skill，完成后回执如下：
@@ -140,7 +140,7 @@ low: ...
 
 zhizhi → main:
 【匹配完成】
-result_csv: /Users/ii/.../02_result/jobs_data_20260805_判定结果.csv
+result_csv: $WORK_DIR/02_result/jobs_data_20260805_判定结果.csv
 total: 30
 high: 5
 medium: 12
@@ -152,8 +152,8 @@ low: 13
 ```
 main → zhizhi:
 【JD 匹配任务】
-raw_csv: /Users/ii/.../01_raw/jobs_data_20260805.csv
-result_dir: /Users/ii/.../02_result/
+raw_csv: $WORK_DIR/01_raw/jobs_data_20260805.csv
+result_dir: $WORK_DIR/02_result/
 candidate_config: new
 
 zhizhi → main:
@@ -166,7 +166,7 @@ zhizhi 需要候选人画像才能判断，请在飞书上和 zhizhi 对话完�
 
 zhizhi → main:
 【匹配完成】
-result_csv: /Users/ii/.../02_result/jobs_data_20260805_判定结果.csv
+result_csv: $WORK_DIR/02_result/jobs_data_20260805_判定结果.csv
 total: 30
 high: 3
 medium: 8
