@@ -1,6 +1,6 @@
 ---
 name: boss-pipeline
-description: "Boss 直聘全流程自动化：爬取 JD → Agent 判定优先级 → 定时打招呼，含实时监控网页。"
+description: "Boss 直聘全流程自动化：爬取 JD → 本地判定优先级（零 token）→ 定时打招呼，含实时监控网页。"
 metadata:
   {
     "openclaw":
@@ -19,7 +19,8 @@ allowed-tools: Bash,Read,Write,exec,message,cron,sessions_send
 
 # Boss 直聘全流程自动化 (boss-pipeline)
 
-> 编排者：龙虾CEO（main） — 执行者：boss-resume-crawler / zhizhi / boss-auto-greet
+> 默认判定引擎是本机 Python 引擎（`job-match-priority`），零 token。
+> Agent 协作是**可选**路径，见文末附录；主路径不需要任何外部 agent。
 
 ---
 
@@ -33,138 +34,121 @@ allowed-tools: Bash,Read,Write,exec,message,cron,sessions_send
 | 问题 | 默认值 | 说明 |
 |------|--------|------|
 | 打招呼时段 | 次日 10:00 | 格式 `HH:MM` 或 `明天 HH:MM` |
-| 打招呼语 | 内置默认 | 可自定义 |
+| 打招呼语 | 内置通用模板 | 可用 `--message` 覆盖 |
 | 单批上限 | 全部（即 medium+high 总数） | 限制单次数量，防风控 |
 
 默认话术：
+
 ```
-您好，看到贵司在招的岗位很感兴趣，我的背景和经验比较匹配，希望能有机会进一步沟通~
+您好，我对贵司在招的岗位很感兴趣，想进一步了解岗位要求。方便的话希望能和您沟通，谢谢！
 ```
 
 ---
 
-## 二、流程概览
+## 二、主路径
 
 ```
-ii 给出列表页 URL
+用户给出列表页 URL
   │
   ▼
-[阶段0 环境]  main → 检查 CloakBrowser/CDP/登录/依赖
-  │  输出：环境就绪 or 阻塞项
+[阶段0 环境]  env_check.py 六项自检
+  │  输出：环境就绪 or 阻塞项（带修复命令）
   ▼
-[阶段1 爬取]  main → boss-resume-crawler (boss_extract_cdp.py)
+[阶段1 爬取]  Dashboard / boss_extract_cdp.py
   │  产出：01_raw/jobs_data_*.csv + progress.json + jobs_cache.json
   │  汇报：共 N 条 / 成功率 / 字段完整率
   ▼
-[阶段2 判断]  main → sessions_send → zhizhi (job-match-priority)
+[阶段2 判定]  本地引擎 run_match.py（零 token）
   │  产出：02_result/*_判定结果.csv
   │  汇报：high / medium / low 分布
   ▼
-[阶段3 打招呼]  main → cron at 定时 → boss-auto-greet
+[阶段3 打招呼]  dry-run → 首条测试 → 批量 / 定时
   │  产出：03_greet/greet_log.csv
   │  汇报：已打 K 条 / 失败 F 条
   ▼
-ii 跟进沟通
+用户跟进沟通
 ```
+
+默认数据根：`~/.boss-pipeline/`。产物根优先级：`BOSS_PIPELINE_WORK_ROOT` > `config.json.work_root` > `~/.boss-pipeline/work`。
 
 ---
 
 ## 三、阶段0：环境检查
 
-**执行者**：main（龙虾CEO）
-
-**检查清单**（全部通过才进入阶段1）：
-
-| # | 检查项 | 验证方法 | 失败处理 |
-|---|--------|---------|---------|
-| 1 | Python3 + websocket-client | `python3 -c "import websocket"` | 提示安装 |
-| 2 | CloakBrowser 已启动（有头） | `curl -s http://localhost:9222/json/version` | 引导启动脚本 |
-| 3 | Boss 直聘已登录 | 导航到列表页 URL，检查页面标题不含"登录" | 暂停等扫码，登录后重导航 |
-| 4 | 输出目录可写 | `mkdir -p` 测试 | 提示权限问题 |
-
-**目录创建**（pipeline 启动即建）：
-```
-workspace/boss直聘一体化/YYYY-MM-DD-<搜索词>/
-  ├── pipeline_state.json
-  ├── 01_raw/
-  ├── 02_result/
-  ├── 03_greet/
-  └── pipeline.log
+```bash
+python3 scripts/env_check.py
 ```
 
-**状态机**：`update_state(work_dir, stage="crawl", status="running")`
+六项：Python 与依赖、CloakBrowser、CDP 9222、Boss 登录、端口、画像配置。
+每项失败都会给一条 `↳ 修复` 命令。带 `❌` 的阻塞项（目前只有 Python 依赖）必须先处理。
+
+只想看配置是否就绪：
+
+```bash
+python3 scripts/onboard.py --status
+```
+
+- `needs_onboarding=true` → 引导用户跑 `python3 scripts/onboard.py`，或双击启动器进 `/wizard.html`
+- `needs_onboarding=false` → 直接进入阶段1
 
 ---
 
 ## 四、阶段1：爬取
 
-**执行者**：main → boss-resume-crawler
+**推荐**：双击 `launcher/Boss直聘监控.command`，在 Dashboard 里点「🕷️ 新建爬取任务」并粘贴 URL。
+启动器会先跑 `env_check.py`；没有画像时自动把浏览器指到向导页。
 
-**步骤**：
-1. 启动 Dashboard 服务器（后台）：
-   ```python
-   python3 ~/.agents/skills/boss-pipeline/scripts/serve_dashboard.py \
-     --output-dir 01_raw/ [--port 8765]
-   ```
-2. 初始化进度追踪器：`ProgressTracker(output_dir).start(list_total=0)`
-3. 启动爬取（后台 exec，长任务）：
-   ```bash
-   python3 ~/.agents/skills/boss-resume-crawler/scripts/boss_extract_cdp.py \
-     --output 01_raw/ \
-     --max-scroll 50
-   ```
-4. 汇报 Dashboard URL 给 ii：`🌐 监控页面: http://localhost:8765`
-5. 轮询 `pipeline_state.json` 等待爬取完成（每 30 秒检查一次，最长 2 小时）
+**命令行等价**：
 
-**产出**：`01_raw/jobs_data_*.csv`（含 progress.json + jobs_cache.json）
+```bash
+python3 ../boss-resume-crawler/scripts/boss_extract_cdp.py \
+  --url "<列表页URL>" \
+  --output ~/.boss-pipeline/work/$(date +%F)-<搜索词> \
+  --max-scroll 30
+```
 
-**汇报内容**：
+- `--max-jobs 5` 可先做连通性测试
+- 中断后重跑同一条命令会自动续爬、跨文件去重
+
+**产出**：`01_raw/jobs_data_*.csv`、`progress.json`、`jobs_cache.json`
+
+**汇报模板**：
+
 ```
 【爬取完成】
 共爬取: N 条
 成功: S 条
 失败: F 条
-字段完整率: X%
-平均耗时: X 秒/条
 输出文件: 01_raw/jobs_data_*.csv
 监控页面: http://localhost:8765
 ```
 
-**状态机**：`update_state(work_dir, stage="crawl", status="done", raw_csv=output_file)`
-
 ---
 
-## 五、阶段2：判断
+## 五、阶段2：本地全量判定（默认，零 token）
 
-**执行者**：main → sessions_send → zhizhi
+**前置**：`01_raw/` 下有非空 CSV，画像已就绪。
 
-**前置条件**：`01_raw/` 下有爬取完成的 CSV（非空）
+Dashboard：岗位详情区点「⚡ 进行全量判定」，完成后提示已判定条数与跳过条数。
 
-**步骤**：
-1. 在 `02_result/` 目录为空时（首次）进入此阶段
-2. 读取 `pipeline_state.json` 获取 `raw_csv` 路径
-3. 通过 `sessions_send` 发送任务给 zhizhi（协议见 `references/zhizhi-handoff.md`）：
-   ```
-   raw_csv: <01_raw/ 下的 CSV 绝对路径>
-   result_dir: <02_result/ 绝对路径>
-   candidate_config: last | new | <绝对路径>
-   ```
-4. 等待 zhizhi 回执（最长 30 分钟）：
-   - 收到回执 → 解析（调用 `parse_handoff_reply.py`）
-   - 回执表示需要画像 → 通知 ii 在飞书与 zhizhi 完成引导
-   - 超时无响应 → 重试一次，仍失败则标记 error
-5. 更新 `pipeline_state.json`
+命令行等价：
 
-**candidate_config 取值规则**：
-| 值 | 含义 | 行为 |
-|----|------|------|
-| 绝对路径 | 已有固定画像文件 | 直接读取，跳过 Step 0 |
-| `new` | 首次引导 | zhizhi 走 job-match-priority Step 0 |
-| `last` | 沿用上次 | 默认值，搜索上次画像；找不到等同 `new` |
+```bash
+mkdir -p ~/.boss-pipeline/work/<日期>-<搜索词>/02_result
+python3 ../job-match-priority/scripts/run_match.py \
+  --profile-id <画像id> \
+  --input ~/.boss-pipeline/work/<日期>-<搜索词>/01_raw/jobs_data_<时间>.csv \
+  --out ~/.boss-pipeline/work/<日期>-<搜索词>/02_result/判定结果.csv
+```
 
-**产出**：`02_result/*_判定结果.csv`
+- 默认关键词模式，不联网、不消耗 token
+- 需要更高召回时再加 `--light-embed`（本地 TF-IDF）或 `--api-embed`（需要 API Key）
+- 画像 id 省略时取 `config.json.active_profile`
 
-**汇报内容**：
+**产出**：`02_result/*_判定结果.csv`，在原始列后追加 `优先级判断`、`匹配度`、`优先级判断理由`、`能力条目得分`、`叠加信号` 等列。
+
+**汇报模板**：
+
 ```
 【匹配完成】
 总判断: N 条
@@ -174,168 +158,124 @@ workspace/boss直聘一体化/YYYY-MM-DD-<搜索词>/
 结果文件: 02_result/*_判定结果.csv
 ```
 
-**状态机**：`update_state(work_dir, stage="judge", status="done", result_csv=result_file, counts={total, high, medium, low})`
+判定全低时的排查：见 `TROUBLESHOOTING.md` 第 4 节，或先跑
+
+```bash
+python3 ../job-match-priority/scripts/validate_profile.py ~/.boss-pipeline/profiles/<画像id>/profile.json
+```
 
 ---
 
 ## 六、阶段3：打招呼
 
-**执行者**：main → cron at 定时 → boss-auto-greet
+**前置**：`02_result/` 有判定结果，且 high/medium 合计 > 0。
 
-**前置条件**：`02_result/` 下有判定结果 CSV，且 high/medium 合计 > 0
+**顺序固定：dry-run → 首条 → 批量**。
 
-**步骤**：
-1. 询问 ii 三项（不答用默认）：时段 / 话术 / 单批上限
-2. 调用 `schedule_greet.py` 构建 cron job 参数
-3. 通过 `cron` 工具创建一次性定时任务
-4. 汇报定时信息给 ii
+```bash
+# 1) 只看名单，不发
+python3 ../boss-auto-greet/scripts/boss_auto_greet.py \
+  --csv ~/.boss-pipeline/work/<日期>-<搜索词>/02_result/判定结果.csv \
+  --dry-run --max-greet 3
 
-**cron 任务结构**：
-```javascript
-cron(action="add", job={
-    "name": "boss-greet-{搜索词}-{日期}",
-    "schedule": { "kind": "at", "at": "<ISO-8601 时间戳>" },
-    "payload": {
-        "kind": "agentTurn",
-        "message": "【自动打招呼任务】\n\n请执行 boss-auto-greet 脚本：\n\npython3 ... \\\n  --csv \"<02_result CSV>\" \\\n  --message \"<话术>\" \\\n  --max-greet <上限>\n\n执行完成后汇报结果。"
-    },
-    "sessionTarget": "isolated",
-    "delivery": { "mode": "announce" }
-})
+# 2) 首条测试（发 1 条后暂停确认）
+python3 ../boss-auto-greet/scripts/boss_auto_greet.py \
+  --csv ~/.boss-pipeline/work/<日期>-<搜索词>/02_result/判定结果.csv \
+  --first-one --max-greet 1
+
+# 3) 确认后批量
+python3 ../boss-auto-greet/scripts/boss_auto_greet.py \
+  --csv ~/.boss-pipeline/work/<日期>-<搜索词>/02_result/判定结果.csv \
+  --max-greet <上限>
 ```
 
-**产出**：`03_greet/greet_log.csv`（由 boss-auto-greet 脚本自动写入）
+定时执行（可选）：用 `cron` 工具创建一次性任务，payload 里放上面第 3 条命令；模板见 `references/cron-greet-template.md`。
+时间格式与默认时段规则同该模板。
 
-**汇报内容**：
-```
-【定时打招呼已设置】
-执行时间: 2026-08-06 10:00
-打招呼语: 您好，...
-单批上限: 5
-高优先级: 3 条
-中优先级: 7 条
-```
-
-**状态机**：`update_state(work_dir, stage="greet", status="done", greet={scheduled_at: "..."})` → `update_state(work_dir, stage="done")`
+**产出**：CSV 的 `状态` 列；pipeline 目录下同时写 `03_greet/greet_log.csv`。
 
 ---
 
-## 七、状态机参考
+## 七、状态机与续跑
 
-### 字段说明
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `stage` | `crawl\|judge\|greet\|done` | 当前阶段 |
-| `status` | `running\|waiting\|done\|error` | 当前状态 |
-| `raw_csv` | str | 01_raw/ 下的 CSV 绝对路径 |
-| `result_csv` | str | 02_result/ 下的判定结果 CSV 绝对路径 |
-| `counts` | `{total,high,medium,low}` | 判断结果计数 |
-| `greet` | `{scheduled_at,done,failed}` | 打招呼状态 |
-| `search_query` | str | 搜索词，用于目录命名溯源 |
-| `list_url` | str | 原始列表页 URL |
-| `created_at` / `updated_at` | ISO 时间戳 | 创建/更新时间 |
-
-### 阶段流转
+目录结构：
 
 ```
-crawl:running  →  crawl:done  →  judge:running  →  judge:done  →  greet:done  →  done
-       ↓ error                     ↓ error                     ↓ error
-    error                        error                        error
+~/.boss-pipeline/work/YYYY-MM-DD-<搜索词>/
+├── pipeline_state.json
+├── 01_raw/
+├── 02_result/
+├── 03_greet/
+└── pipeline.log
 ```
 
-### 续跑逻辑
+| 字段 | 说明 |
+|------|------|
+| `stage` | `crawl\|judge\|greet\|done` |
+| `status` | `running\|waiting\|done\|error` |
+| `raw_csv` | 01_raw 下的 CSV 绝对路径 |
+| `result_csv` | 02_result 下的判定结果 CSV 绝对路径 |
+| `counts` | `{total,high,medium,low}` |
+| `greet` | `{scheduled_at,done,failed}` |
+| `created_at` / `updated_at` | ISO 时间戳 |
 
-中断后重新启动 → `load_state(work_dir)` → `next_action(state)` 返回下一步应执行的动作：
-
-| 返回值 | 含义 | 执行动作 |
-|--------|------|---------|
-| `crawl` | 爬取未完成或未开始 | 跳转到阶段1 |
-| `judge` | 爬取完成但未判断 | 跳转到阶段2 |
-| `greet` | 判断完成但未打招呼 | 跳转到阶段3 |
-| `done` | 全流程完成 | 汇报已完成 |
-| `error` | 出错 | 汇报错误信息 |
+中断后：`load_state(work_dir)` → `next_action(state)` 返回 `crawl / judge / greet / done / error`，按返回值续跑。
 
 ---
 
-## 八、子 skill 引用
-
-| 子 skill | 路径 | 用途 |
-|----------|------|------|
-| `boss-resume-crawler` | `~/.agents/skills/boss-resume-crawler/` | 爬取 JD |
-| `job-match-priority` | `~/.agents/skills/job-match-priority/` | 匹配判定（zhizhi 执行） |
-| `boss-auto-greet` | `~/.agents/skills/boss-auto-greet/` | 自动打招呼 |
-
-### 本 skill 辅助文件
+## 八、文件与配置
 
 | 文件 | 用途 |
 |------|------|
-| `scripts/pipeline_state.py` | 状态机读写 |
-| `scripts/parse_handoff_reply.py` | zhizhi 回执解析 |
-| `scripts/schedule_greet.py` | cron 任务构建 |
-| `scripts/progress_tracker.py` | 爬取进度追踪 |
+| `scripts/config_paths.py` | 统一路径解析（`~/.boss-pipeline`、画像、skill 目录、work root） |
+| `scripts/env_check.py` | 六项环境自检 |
+| `scripts/onboard.py` | 五步向导（CLI） |
 | `scripts/serve_dashboard.py` | Dashboard 本地服务器 |
-| `dashboard/index.html` | 实时监控页面 |
-| `references/zhizhi-handoff.md` | 交接协议 |
-| `references/cron-greet-template.md` | cron 模板 |
+| `scripts/pipeline_state.py` | 状态机读写 |
+| `scripts/progress_tracker.py` | 爬取进度追踪 |
+| `scripts/schedule_greet.py` | cron 任务参数构建 |
+| `dashboard/index.html` | 主看板 |
+| `dashboard/wizard.html` | 首次配置向导 |
+
+路径解析优先级：
+
+1. `--home` / `--profile-id` 命令行参数
+2. `BOSS_PIPELINE_HOME` / `BOSS_PIPELINE_SKILLS_ROOT`
+3. `~/.boss-pipeline`
+4. 旧版 `<skill>/config/` 只读回退（会打一次 `[legacy]` 警告）
+
+四个 skill 放在同一父目录时，`config_paths` 会自动定位同级仓库；安装到别处时设 `BOSS_PIPELINE_SKILLS_ROOT`。
 
 ---
 
-## 九、Dashboard 集成
+## 九、异常处理
 
-爬取阶段自动启动本地监控页面。
+| 场景 | 处理 |
+|------|------|
+| CDP 连不上 | 跑 `python3 scripts/env_check.py`，按 CDP 项的修复命令重启浏览器 |
+| Boss 未登录 | 暂停等扫码，登录后重跑 `env_check.py` 确认 |
+| 端口被占用 | `lsof -nP -iTCP:8765 -sTCP:LISTEN`；本 Dashboard 已在跑就直接用，不要起第二个 |
+| 判定全低 | 先跑 `validate_profile.py`，再回向导补关键词/核对目标岗位 |
+| 打招呼失败 | 先 `--dry-run` 核对名单，再 `--first-one` 验证页面结构 |
+| 缺 Python 依赖 | `python3 -m pip install pyyaml requests websocket-client` |
+| 进程中断 | 重跑同一命令，按 `pipeline_state.json` 续跑 |
 
-| 组件 | 端口 | 访问 |
-|------|------|------|
-| HTTP 服务器 | 8765 | `http://localhost:8765` |
-| 默认端口冲突 | 自动尝试 8765-8775 | — |
-
-启动方式（由 main 在阶段1 自动执行）：
-```python
-from serve_dashboard import start_dashboard_server
-url = start_dashboard_server("01_raw/", port=8765)
-```
-
----
-
-## 十、完整交互示例
-
-```
-ii → main:
-boss-pipeline 帮我跑一下 https://www.zhipin.com/web/geek/jobs?query=搜索词示例&city=101020100
-
-main → ii:
-【环境检查】CloakBrowser 已启动 ✅ | 已登录 ✅ | 依赖就绪 ✅
-【阶段1 爬取】开始爬取...
-🌐 监控页面: http://localhost:8765
-
-（爬取完成后）
-
-【爬取完成】共爬取 30 条 / 成功 28 条 / 失败 2 条 / 平均耗时 25 秒/条
-【阶段2 判断】交给 zhizhi 匹配中...
-
-（判断完成后）
-
-【匹配完成】高 5 条 / 中 12 条 / 低 13 条
-【阶段3 打招呼】默认次日 10:00 执行（共 17 条 high+medium），确认吗？
-
-ii → main:
-确认
-
-main → ii:
-【定时打招呼已设置】2026-08-06 10:00 → 17 条
-```
+完整六类故障（现象 → 原因 → 一条命令）见 `TROUBLESHOOTING.md`。
 
 ---
 
-## 十一、异常处理速查
+## 附录 A（可选 / 历史）：Agent 交接判定
 
-| 异常场景 | 处理方式 |
-|----------|---------|
-| CloakBrowser 未启动 | 引导启动：`open ~/.cache/cloakbrowser/Chromium.app --args --remote-debugging-port=9222 --remote-allow-origins=*` |
-| Boss 未登录 | 暂停等扫码，登录后重导航到目标 URL |
-| 爬取超时（>2h） | 标记 error，通知 ii 人工介入 |
-| zhizhi 无画像 | 通知 ii 在飞书和 zhizhi 完成引导 |
-| zhizhi 超时 | 重试一次，仍失败标记 error |
-| 打招呼 cron 创建失败 | 记录错误，建议 ii 手动执行 |
-| 进程中断 | 重启后 `load_state` → `next_action` 续跑 |
+> 默认不需要。只有当用户明确要求把判定交给另一个 agent 时才走这里。
+> 本机 Python 引擎已经覆盖日常判定，且零 token；交接路径保留是为了兼容旧工作流。
+
+历史协议：`references/` 下以 `handoff` 结尾的交接说明（旧版 Agent 交接：`sessions_send` 消息格式、回执解析、超时处理）。
+相关脚本：`scripts/parse_handoff_reply.py`。
+
+使用前提：
+
+1. 用户明确指定接收方 agent 及其 sessionKey
+2. `01_raw/` 下已有爬取完成的 CSV
+3. 接收方能够读取用户本机的画像（或者由用户提供画像文件路径）
+
+不满足以上任一条，直接走第五节的本地判定，不要引导用户去找外部 agent。
