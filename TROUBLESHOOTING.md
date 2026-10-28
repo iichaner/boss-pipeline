@@ -9,7 +9,8 @@ python3 scripts/env_check.py
 下面每类按「现象 → 原因 → 一条命令」组织。命令都在 **boss-pipeline 仓库根目录** 执行，画像 id 先设好：
 
 ```bash
-PROFILE=me
+# 画像 id 以 --status 为准（不要写死 me；重试/重名时可能是 me-2）
+PROFILE=$(python3 scripts/onboard.py --status | sed -n 's/^画像：//p')
 ```
 
 ---
@@ -166,6 +167,32 @@ python3 -m pip install pyyaml requests websocket-client
 ```bash
 <python路径> -m pip install pyyaml requests websocket-client
 ```
+
+---
+
+## 7. 向导提交失败 / 画像 id 变了
+
+**现象**
+
+```
+提交失败：
+  - E-SCHEMA-006 rules.taxonomy[0].keywords[0] 长度 < 2
+```
+
+或重试几次后画像 id 从 `me` 变成了 `me-3`，文档里的命令报「画像不存在」。
+
+**原因**：早期版本只在最后一步做 schema 校验，关键词太短（<2 字）会拖到提交时才报，
+且每次重试都会新建一个画像目录。新版已在输入时就逐字段校验，并复用同一份草稿 id。
+
+**一条命令**
+
+```bash
+python3 scripts/onboard.py --status      # 看哪个字段不合格 + 当前画像 id
+python3 scripts/onboard.py --step 2      # 回到第 2 步改（不会丢已填内容）
+```
+
+按提示把关键词改到 ≥2 字即可；已发布的同名画像不会被覆盖，若提示已存在，
+在第 2 步换一个画像 id 再提交。
 
 ---
 

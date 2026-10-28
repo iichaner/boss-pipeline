@@ -62,17 +62,29 @@ if [ "$CONFIG_READY" != "1" ]; then
   echo "   命令行方式：$PYTHON_BIN $SKILL_DIR/scripts/onboard.py"
 fi
 
-# launchd 常驻服务优先：8765 已活着就直接开浏览器，不再起第二个服务
-# （两个服务共用同一历史根目录会出现两个监控调度线程抢同一批任务 = 重复爬 = 风控风险；
-#   代码层已加 flock 兜底，这里是把双击体验也对齐）
+# D1：8765 复用前必须校验运行中的服务用的是同一个 BOSS_PIPELINE_HOME。
+# 指纹 = sha256(realpath(home))[:16]，与 /api/health 返回的 home_fingerprint 同算法；
+# 指纹相同才说明是「同一套数据」，否则一律换端口，绝不把用户送进别人的 Dashboard。
+HOME_FP="$("$PYTHON_BIN" - "$PIPELINE_HOME" <<'PY'
+import hashlib, os, sys
+p = os.path.realpath(os.path.expanduser(sys.argv[1]))
+print(hashlib.sha256(p.encode('utf-8')).hexdigest()[:16])
+PY
+)"
 if lsof -nP -i :8765 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "▶ 检测到常驻服务已在 8765 运行（launchd），直接打开浏览器"
-  if [ "$CONFIG_READY" != "1" ]; then
-    open "http://localhost:8765/wizard.html"
-  else
-    open "http://localhost:8765"
+  REMOTE_FP="$(curl -s --max-time 2 http://127.0.0.1:8765/api/health 2>/dev/null \
+    | "$PYTHON_BIN" -c 'import sys,json;print((json.load(sys.stdin) or {}).get("home_fingerprint",""))' 2>/dev/null || true)"
+  if [ -n "$HOME_FP" ] && [ "$REMOTE_FP" = "$HOME_FP" ]; then
+    echo "▶ 检测到常驻服务已在 8765 运行，且 home 指纹一致（同一套数据），直接打开浏览器"
+    if [ "$CONFIG_READY" != "1" ]; then
+      open "http://localhost:8765/wizard.html"
+    else
+      open "http://localhost:8765"
+    fi
+    exit 0
   fi
-  exit 0
+  echo "⚠️ 8765 被另一套数据占用（home 指纹：本地 ${HOME_FP:-未知} / 远端 ${REMOTE_FP:-未知}）"
+  echo "   → 不复用该服务，自动换到下一个空闲端口"
 fi
 
 # 找可用端口（8765-8775）

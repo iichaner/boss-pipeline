@@ -35,6 +35,7 @@ class OnboardingMixin:
     # ── GET ───────────────────────────────────────────────
     def _onb_state(self):
         try:
+            # B1：只回进度（step/done），不回任何答案内容
             return self._json_response(oc.status())
         except Exception as e:
             # 静默降级：前端 catch 放行，不把用户锁在向导外
@@ -46,6 +47,13 @@ class OnboardingMixin:
                 'reason': 'state_error',
                 'error': str(e),
             })
+
+    def _onb_draft(self):
+        """表单回填专用：仅同源页面可读（与 state 分离，降低跨域泄露面）。"""
+        try:
+            return self._json_response(oc.draft_payload())
+        except Exception as e:
+            return self._json_response({'ok': False, 'answers': {}, 'error': str(e)}, 500)
 
     def _onb_env(self):
         try:
@@ -99,8 +107,12 @@ class OnboardingMixin:
             if (profile is None) != (prefs is None):
                 return self._json_response(
                     {'ok': False, 'errors': ['profile / prefs 必须同时提供或同时省略']}, 400)
+            # A5：finalize 只决定「发布」还是「只存草稿」，不再是一个可绕过闸门的开关
             finalize = data.get('finalize', True)
-            result = oc.commit(profile, prefs, bool(finalize))
+            if not isinstance(finalize, bool):
+                return self._json_response(
+                    {'ok': False, 'errors': ['finalize 必须是布尔值']}, 400)
+            result = oc.commit(profile, prefs, finalize)
             return self._json_response(result, 200 if result.get('ok') else 400)
         except cp.ConfigError as e:
             return self._json_response({'ok': False, 'errors': [str(e)]}, 400)

@@ -180,6 +180,10 @@ def split_config(match_cfg: dict, literals: dict) -> dict:
             ab['enabled'] = False
         else:
             ov['ai_boost'] = {'enabled': False, 'scope': 'title'}
+    else:
+        # C2：没有 override_signals 的旧配置也要显式写 ai_boost.enabled=false，
+        # 否则 I2 的 T-1 断言（读 prefs）会误报
+        rules['override_signals'] = {'ai_boost': {'enabled': False, 'scope': 'title'}}
 
     rules['title_bias'] = {
         'strong_keywords': (literals or {}).get('strong_keywords') or [],
@@ -225,14 +229,15 @@ def check_i2(prefs: dict, effective: dict, frozen: dict, literals: dict) -> tupl
         _cmp(key, effective.get(key), frozen[key])
 
     # override_signals：迁移新增 ai_boost.enabled=false（旧文件无此键，行为等价）
-    f_ov = copy.deepcopy(frozen.get('override_signals') or {})
-    e_ov = copy.deepcopy(effective.get('override_signals') or {})
-    if isinstance(f_ov.get('ai_boost'), dict):
-        f_ov['ai_boost'].pop('enabled', None)
-    e_ab = (e_ov.get('ai_boost') or {})
-    if isinstance(e_ov.get('ai_boost'), dict):
-        e_ov['ai_boost'] = {k: v for k, v in e_ov['ai_boost'].items() if k != 'enabled'}
-    _cmp('override_signals', e_ov, f_ov)
+    if 'override_signals' in frozen:
+        f_ov = copy.deepcopy(frozen.get('override_signals') or {})
+        e_ov = copy.deepcopy(effective.get('override_signals') or {})
+        if isinstance(f_ov.get('ai_boost'), dict):
+            f_ov['ai_boost'].pop('enabled', None)
+        e_ab = (e_ov.get('ai_boost') or {})
+        if isinstance(e_ov.get('ai_boost'), dict):
+            e_ov['ai_boost'] = {k: v for k, v in e_ov['ai_boost'].items() if k != 'enabled'}
+        _cmp('override_signals', e_ov, f_ov)
 
     if (prefs.get('rules', {}).get('override_signals', {}).get('ai_boost', {})
             .get('enabled') is not False):
@@ -388,6 +393,58 @@ class Migrator:
         print('[rollback] 已删除 migration.json；旧文件未被改动，系统回到迁移前状态')
         return EXIT_OK
 
+    # -- 字面量 ------------------------------------------------
+    def _resolve_literals(self, match_cfg: dict):
+        """K11–K15 取值链（C2）：绝不静默写空词表。
+
+        1) matcher.py 内联字面量（P3 之前的老仓库）
+        2) 源 match_config.yaml 自带的 title_bias
+        3) 已存在的 profiles/<id>/prefs.yaml
+        4) templates/legacy_literals.yaml（v1.1 冻结快照，随仓库分发）
+        5) 全部缺失 → E-LITERALS 明确报错（不发布、不回滚）
+        """
+        lit = extract_matcher_literals()
+        if lit:
+            print('[literals] 来源：matcher.py 内联字面量')
+            return lit
+
+        tb = (match_cfg or {}).get('title_bias')
+        if isinstance(tb, dict) and tb.get('strong_keywords'):
+            print('[literals] 来源：源 match_config.yaml 的 title_bias')
+            return {
+                'strong_keywords': list(tb.get('strong_keywords') or []),
+                'senior_title_keywords': list(tb.get('senior_title_keywords') or []),
+                'core_dimensions': sorted(tb.get('core_dimensions') or []),
+                'dimension_aliases': dict((match_cfg or {}).get('dimension_aliases') or {}),
+            }
+
+        existing = self.profile_dir / 'prefs.yaml'
+        if existing.is_file():
+            try:
+                lit = literals_from_prefs(cp.read_yaml(existing))
+                if lit.get('strong_keywords'):
+                    print('[literals] 来源：既有 prefs.yaml（保留已外提的词表）')
+                    return lit
+            except Exception:
+                pass
+
+        try:
+            lit = cp.legacy_literals()
+            print('[literals] 来源：templates/legacy_literals.yaml（v1.1 冻结）')
+            return {
+                'strong_keywords': lit['title_bias']['strong_keywords'],
+                'senior_title_keywords': lit['title_bias']['senior_title_keywords'],
+                'core_dimensions': lit['title_bias']['core_dimensions'],
+                'dimension_aliases': lit['dimension_aliases'],
+            }
+        except cp.ConfigError as e:
+            print('E-LITERALS 无法确定标题闸门词表：matcher.py 已外提到 prefs，'
+                  '源 match_config.yaml 也没有 title_bias。\n'
+                  '此时写空词表会关闭闸门、改变旧判定，并导致 I2 失败回滚；'
+                  '本次未写入任何文件。\n'
+                  f'{e}', file=sys.stderr)
+            sys.exit(EXIT_VALIDATE)
+
     # -- 主流程 ----------------------------------------------
     def run(self, verify_only: bool = False) -> int:
         # 0) 崩溃恢复：上次 publish 中断 → 先回滚再重来
@@ -406,13 +463,22 @@ class Migrator:
         if pa.is_v2(legacy_profile):
             _die(EXIT_SOURCE, f'E-SOURCE 源画像已是 v2：{sources["profile"]}')
 
-        literals = extract_matcher_literals()
-        frozen = cp.read_yaml(cp.baseline_dir() / 'match_config_20261028.yaml') \
-            if (cp.baseline_dir() / 'match_config_20261028.yaml').is_file() else None
-        if frozen is None:
-            print(f'E-SOURCE 缺少冻结快照：{cp.baseline_dir() / "match_config_20261028.yaml"}',
-                  file=sys.stderr)
-            return EXIT_SOURCE
+        # 先读源配置：字面量链与冻结快照都需要它
+        match_cfg = cp.read_yaml(sources['match_config'])
+
+        literals = self._resolve_literals(match_cfg)
+
+        # C1：冻结快照缺失（新机器）时，从源 match_config.yaml 现场生成，不再 E-SOURCE。
+        frozen_path = cp.baseline_dir() / 'match_config_20261028.yaml'
+        if frozen_path.is_file():
+            frozen = cp.read_yaml(frozen_path)
+        else:
+            frozen = copy.deepcopy(match_cfg)
+            frozen_path.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(frozen_path.parent, 0o700)
+            cp.atomic_write(frozen_path, _dump_yaml(frozen), mode=0o600)
+            print(f'[baseline] 未找到冻结快照，已从源 match_config.yaml 生成：{frozen_path}')
 
         # 幂等判定
         if self.migration_json.is_file() and not self.force:
@@ -452,13 +518,7 @@ class Migrator:
                     self.migration_json.read_text(encoding='utf-8')).get('created_at')
         profile_v2 = pa.to_v2(legacy_profile, self.pid,
                               created_at=created_at or _now(), updated_at=_now())
-        match_cfg = cp.read_yaml(sources['match_config'])
-        # K11–K15 已外提：源码无字面量时，沿用既有 prefs 里的值（重迁移不得清空词表）
-        if literals is None:
-            existing_prefs = self.profile_dir / 'prefs.yaml'
-            if existing_prefs.is_file():
-                with contextlib.suppress(Exception):
-                    literals = literals_from_prefs(cp.read_yaml(existing_prefs))
+        # K11–K15 已外提：源码无字面量时，_resolve_literals 已按 C2 取值链给出非空词表
         prefs = split_config(match_cfg, literals)
         taxonomy_text = sources['taxonomy'].read_text(encoding='utf-8')
 

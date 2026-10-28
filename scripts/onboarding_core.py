@@ -168,7 +168,8 @@ def status() -> dict:
         needs, reason = True, 'no_home'
     else:
         try:
-            explicit = pid if pid and (cp.profiles_dir() / pid).is_dir() else None
+            explicit = pid if (pid and PROFILE_ID_RE.match(str(pid))
+                               and (cp.profiles_dir() / str(pid)).is_dir()) else None
             pid = cp.resolve_profile_id(explicit)
             cp.load_profile(pid)
             cp.load_prefs(pid)
@@ -193,6 +194,12 @@ def status() -> dict:
     if st.get('completed') and valid and published:
         needs, reason, completed = False, None, True
 
+    # B3：state 文件可手改，回传前再兜一层 id 校验
+    if pid and not PROFILE_ID_RE.match(str(pid)):
+        pid = None
+
+    # B1：state 只回进度标志，不回填任何答案内容（称呼/薪资/城市/关键词）。
+    # 需要回填表单时走 GET /api/onboarding/draft（同样仅同源可读）。
     return {
         'needs_onboarding': bool(needs),
         'profile_id': pid,
@@ -201,8 +208,20 @@ def status() -> dict:
         'reason': reason,
         'steps': [{'step': i, 'label': STEP_LABELS[i],
                    'done': i in (st.get('completed_steps') or [])} for i in range(1, STEPS + 1)],
-        'answers': st.get('answers') or {},
+        'draft_available': bool(st.get('answers')),
         'updated_at': st.get('updated_at'),
+    }
+
+
+def draft_payload() -> dict:
+    """向导草稿（表单回填用）。只在本机同源页面使用，不进 /api/onboarding/state。"""
+    st = load_state()
+    return {
+        'ok': True,
+        'profile_id': st.get('profile_id'),
+        'step': int(st.get('step') or 1),
+        'completed': bool(st.get('completed')),
+        'answers': st.get('answers') or {},
     }
 
 
@@ -311,6 +330,9 @@ def _validate_profile_answers(a: dict) -> list:
             errors.append(f'维度「{k}」自评必须在 0–5 之间')
 
     kw = a.get('dimension_keywords') or {}
+    if not isinstance(kw, dict):
+        errors.append('维度关键词必须是 {维度: [关键词…]}')
+        kw = {}
     nonempty = [k for k, v in kw.items() if _list(v)]
     if len(nonempty) < 3:
         errors.append('至少为 3 个维度各填 1 个以上关键词（否则样例判定会全空）')
@@ -320,6 +342,13 @@ def _validate_profile_answers(a: dict) -> list:
     for k in nonempty:
         if k not in caps:
             errors.append(f'关键词维度「{k}」不在能力自评里')
+        if len(str(k)) < 2:
+            errors.append(f'维度名「{k}」太短：维度名至少 2 个字')
+        for w in _list(kw.get(k)):
+            # A1：与 prefs.schema.json 的 keywords[].minLength=2 同一规则，
+            # 在输入阶段就用中文说清楚，不再等到提交时抛 E-SCHEMA-006。
+            if len(str(w)) < 2:
+                errors.append(f'维度「{k}」的关键词「{w}」太短：关键词至少 2 个字，请重填')
 
     inds = (a.get('experience') or {}).get('industries') or []
     if not isinstance(inds, list):
@@ -335,6 +364,56 @@ def _validate_profile_answers(a: dict) -> list:
 def _profile_id_from(st_or_answers: dict) -> str:
     a = st_or_answers.get('answers') if 'answers' in st_or_answers else st_or_answers
     return str((a or {}).get('profile_id') or 'me').strip().lower()
+
+
+def _num_or(v, default=None):
+    try:
+        n = float(v)
+    except Exception:
+        return default
+    return int(n) if float(n).is_integer() else n
+
+
+def normalize_answers(a: dict) -> dict:
+    """把表单里的字符串数字归一成 number，避免校验通过、落盘却被 schema 拒绝。
+
+    A1/ONB-04：`_num()` 原先只校验不回收结果，`"5"` 会被原样写进 profile.json，
+    提交时再被 validate_profile 以 E-SCHEMA-001 拒绝（用户看不懂）。
+    """
+    out = copy.deepcopy(a or {})
+    ident = out.get('identity')
+    if isinstance(ident, dict):
+        if 'total_years' in ident:
+            n = _num_or(ident.get('total_years'))
+            if n is not None:
+                ident['total_years'] = n
+        langs = ident.get('languages')
+        if isinstance(langs, dict):
+            for k, v in list(langs.items()):
+                n = _num_or(v)
+                if n is not None:
+                    langs[k] = n
+    tgt = out.get('targets')
+    if isinstance(tgt, dict):
+        sal = tgt.get('salary')
+        if isinstance(sal, dict):
+            for k in ('min_k', 'max_k'):
+                if k in sal:
+                    n = _num_or(sal.get(k))
+                    if n is not None:
+                        sal[k] = n
+    caps = (out.get('capabilities') or {}).get('dimensions')
+    if isinstance(caps, dict):
+        for k, v in list(caps.items()):
+            n = _num_or(v)
+            if n is not None:
+                caps[k] = n
+    for key in ('dimension_keywords',):
+        d = out.get(key)
+        if isinstance(d, dict):
+            for k, v in list(d.items()):
+                d[k] = _list(v)
+    return out
 
 
 def build_profile(st: dict) -> dict:
@@ -373,9 +452,9 @@ def build_profile(st: dict) -> dict:
         'updated_at': now,
         'identity': {
             'display_name': str(ident.get('display_name') or '').strip(),
-            'total_years': ident.get('total_years') or 0,
+            'total_years': _num_or(ident.get('total_years'), 0),
             'education': ident.get('education') or '其他',
-            'languages': {str(k): int(v) for k, v in (ident.get('languages') or {}).items()},
+            'languages': {str(k): _num_or(v, 0) for k, v in (ident.get('languages') or {}).items()},
             'certifications': _list(ident.get('certifications')),
         },
         'targets': {
@@ -385,7 +464,7 @@ def build_profile(st: dict) -> dict:
             'exclude_role_keywords': _list(tgt.get('exclude_role_keywords')),
             'cities': _list(tgt.get('cities')),
             'accept_remote': bool(tgt.get('accept_remote', False)),
-            'salary': {'min_k': sal.get('min_k'), 'max_k': sal.get('max_k')},
+            'salary': {'min_k': _num_or(sal.get('min_k')), 'max_k': _num_or(sal.get('max_k'))},
             'welfare_floor': [],
         },
         'experience': {
@@ -393,7 +472,7 @@ def build_profile(st: dict) -> dict:
             'role_years': {},
         },
         'capabilities': {
-            'dimensions': {str(k): int(v) for k, v in caps.items()},
+            'dimensions': {str(k): _num_or(v, 0) for k, v in caps.items()},
             'confidence': 'self',
         },
         'filters': {
@@ -546,6 +625,63 @@ def _answers_from(profile: dict, prefs: dict, st: dict) -> dict:
 
 
 # ── 提交答案 ──────────────────────────────────────────────
+def _clamp_step(step) -> int:
+    try:
+        n = int(step)
+    except Exception:
+        return 1
+    return max(1, min(STEPS, n))
+
+
+def rewind_to(step: int) -> dict:
+    """回到某一步重填：清掉该步及之后的完成标记，ready 归零。
+
+    A1「允许返回上一步修改」的后端支撑；已发布画像不受影响。
+    """
+    st = load_state()
+    step = _clamp_step(step)
+    st['step'] = step
+    st['completed_steps'] = [s for s in (st.get('completed_steps') or []) if s < step]
+    if step <= STEPS:
+        st['ready'] = False
+    save_state(st)
+    return st
+
+
+def first_invalid_step(st: dict = None):
+    """返回 (step, errors)：第一个「已保存但重跑必失败」的步骤。
+
+    A1：`--resume` 先用它自检，绝不原样重试必然失败的步骤。
+    """
+    st = st or load_state()
+    ans = st.get('answers') or {}
+    done = set(st.get('completed_steps') or [])
+    if ans and (2 in done or st.get('step', 1) >= 2):
+        errs = _validate_profile_answers(ans)
+        if errs:
+            return 2, errs
+    if done:
+        for s in (4, 5):
+            if s in done:
+                errs = validate_step(s, ans, st)
+                if errs:
+                    return s, errs
+    return None, []
+
+
+def repair_state() -> dict | None:
+    """把状态倒退到第一个出错步骤；无错返回 None。"""
+    st = load_state()
+    step, errs = first_invalid_step(st)
+    if not step:
+        return None
+    st['step'] = step
+    st['completed_steps'] = [s for s in (st.get('completed_steps') or []) if s < step]
+    st['ready'] = False
+    save_state(st)
+    return {'step': step, 'errors': errs}
+
+
 def submit_step(step: int, answers: dict) -> dict:
     st = load_state()
     try:
@@ -560,24 +696,40 @@ def submit_step(step: int, answers: dict) -> dict:
         return {'ok': False, 'step': st['step'], 'next_step': st['step'],
                 'errors': [f'请先完成第 {st["step"]} 步（不能跳步）']}
 
-    errors = validate_step(step, answers, st)
-    if errors:
-        return {'ok': False, 'step': st['step'], 'next_step': st['step'], 'errors': errors}
-
+    incoming = normalize_answers(answers or {}) if step == 2 else copy.deepcopy(answers or {})
     merged = copy.deepcopy(st.get('answers') or {})
-    merged.update(copy.deepcopy(answers or {}))
+    merged.update(incoming)
     if step == 2:
-        merged['profile_id'] = _profile_id_from(answers or {})
+        merged['profile_id'] = _profile_id_from(incoming)
         st['profile_id'] = merged['profile_id']
+
+    # 第 3 步起，整份偏好必须能通过校验（否则第 5 步提交必然失败）
+    if step >= 3:
+        pre_errors = _validate_profile_answers(merged)
+        if pre_errors:
+            st['step'] = 2
+            st['completed_steps'] = [s for s in (st.get('completed_steps') or []) if s < 2]
+            st['ready'] = False
+            save_state(st)
+            return {'ok': False, 'step': st['step'], 'next_step': 2,
+                    'fix_step': 2, 'errors': pre_errors}
+
+    errors = validate_step(step, merged, st)
+    if errors:
+        return {'ok': False, 'step': st['step'], 'next_step': st['step'],
+                'fix_step': step, 'errors': errors}
+
     st['answers'] = merged
     if step not in st['completed_steps']:
         st['completed_steps'].append(step)
         st['completed_steps'].sort()
-    if step < STEPS:
+    # 回改早先步骤时不倒退当前进度；只有往前时才推进
+    if step >= st['step'] and step < STEPS:
         st['step'] = step + 1
-    else:
+    elif step == STEPS:
         st['step'] = STEPS
-        st['ready'] = True
+    st['ready'] = (all(s in st['completed_steps'] for s in range(1, STEPS + 1))
+                   and not validate_step(5, merged, st))
     save_state(st)
 
     resp = {'ok': True, 'step': step, 'next_step': st['step'], 'errors': []}
@@ -624,18 +776,57 @@ def _run_validator(profile_path: Path, prefs_path: Path):
                                  'warnings': [], 'exit': out.returncode}
 
 
-def _next_profile_id(base: str, root: Path) -> str:
-    pid, n = base, 2
-    while (root / 'profiles' / pid).exists():
-        pid = f'{base}-{n}'
-        n += 1
-        if n > 50:
-            raise OnboardingError('同名画像过多，请换一个画像 id')
-    return pid
+def _write_root_state(root: Path, st: dict) -> None:
+    st = dict(st)
+    st['updated_at'] = _now()
+    text = json.dumps(st, ensure_ascii=False, indent=2) + '\n'
+    cp.atomic_write(root / 'state' / STATE_NAME, text, mode=0o600)
+
+
+def _published_here(pdir: Path) -> bool:
+    return ((pdir / cp.PUBLISHED_NAME).is_file()
+            or (pdir / 'migration.json').is_file())
+
+
+def _save_draft(profile: dict, prefs: dict, st: dict) -> dict:
+    """A5：finalize=false 只落草稿，绝不动 profiles/<id>/ 与 published.json。"""
+    root = _home(create=True)
+    if root is None:
+        return {'ok': False, 'draft': True, 'profile_id': None, 'warnings': [],
+                'errors': ['无法创建 ~/.boss-pipeline（检查目录权限）']}
+    pid = str(profile.get('id') or 'me').lower()
+    if not PROFILE_ID_RE.match(pid):
+        return {'ok': False, 'draft': True, 'profile_id': None, 'warnings': [],
+                'errors': ['画像 id 非法：只允许小写字母/数字/下划线/短横线（≤32 位）']}
+    d = root / 'state' / 'drafts' / pid
+    d.mkdir(parents=True, exist_ok=True)
+    _chmod(d, 0o700)
+    _chmod(d.parent, 0o700)
+    cp.atomic_write(d / 'profile.json',
+                    json.dumps(profile, ensure_ascii=False, indent=2) + '\n', mode=0o600)
+    cp.atomic_write(d / 'prefs.yaml',
+                    cp._yaml().safe_dump(prefs, allow_unicode=True, sort_keys=False,
+                                         default_flow_style=False, width=1000), mode=0o600)
+    st['draft_saved_at'] = _now()
+    _write_root_state(root, st)
+    return {
+        'ok': True,
+        'draft': True,
+        'profile_id': pid,
+        'path': str(d),
+        'warnings': [],
+        'errors': [],
+        'next': '草稿已保存（未发布）。完成第 5 步 dry-run 后再提交才会发布画像。',
+    }
 
 
 def commit(profile: dict = None, prefs: dict = None, finalize: bool = True) -> dict:
-    """原子发布 profile.json / prefs.yaml / published.json + config.json。"""
+    """原子发布 profile.json / prefs.yaml / published.json + config.json。
+
+    A5 语义：
+      * finalize=true 仅在「第 5 步已在 completed_steps 且 dry_run=true」时允许；
+      * finalize=false 只写 state/drafts/<id>/，绝不写 published.json / config.json。
+    """
     st = load_state()
     if profile is None:
         profile = build_profile(st)
@@ -643,10 +834,22 @@ def commit(profile: dict = None, prefs: dict = None, finalize: bool = True) -> d
         prefs = build_prefs(st)
     errors = _validate_profile_answers(_answers_from(profile, prefs, st))
     if errors:
-        return {'ok': False, 'profile_id': None, 'warnings': [], 'errors': errors}
-    if finalize and not st.get('ready'):
-        return {'ok': False, 'profile_id': None, 'warnings': [],
-                'errors': ['请先完成第 5 步 dry-run，再提交']}
+        # 把状态倒回第 2 步，避免 --resume 在第 5 步反复重试同一个必败校验
+        st['step'] = 2
+        st['completed_steps'] = [s for s in (st.get('completed_steps') or []) if s < 2]
+        st['ready'] = False
+        save_state(st)
+        return {'ok': False, 'profile_id': None, 'fix_step': 2,
+                'warnings': [], 'errors': errors}
+
+    if not finalize:
+        return _save_draft(profile, prefs, st)
+
+    completed = set(st.get('completed_steps') or [])
+    if 5 not in completed or not st.get('ready') \
+            or (st.get('answers') or {}).get('dry_run') is not True:
+        return {'ok': False, 'profile_id': None, 'fix_step': 5, 'warnings': [],
+                'errors': ['第 5 步 dry-run 尚未完成：请先完成第 5 步（dry_run=true）再提交']}
 
     root = _home(create=True)
     if root is None:
@@ -655,22 +858,40 @@ def commit(profile: dict = None, prefs: dict = None, finalize: bool = True) -> d
     base = str(profile.get('id') or 'me').lower()
     if not PROFILE_ID_RE.match(base):
         return {'ok': False, 'profile_id': None, 'warnings': [],
-                'errors': ['画像 id 非法']}
+                'errors': ['画像 id 非法：只允许小写字母/数字/下划线/短横线（≤32 位）']}
 
     with cp.locked(root / 'state' / 'locks' / 'profile.lock'):
-        pid = st.get('published_profile_id') or _next_profile_id(base, root)
+        # A2：草稿幂等——同一 id 的重试复用同一目录，不再 me-2/me-3；
+        # 只有用户明确改了 id（draft_base 变化）才换目标。
+        prev_base = st.get('draft_base')
+        pid = st.get('draft_profile_id') or st.get('published_profile_id')
+        if not pid or (prev_base and prev_base != base):
+            pid = base
+        if not PROFILE_ID_RE.match(pid):
+            return {'ok': False, 'profile_id': None, 'warnings': [],
+                    'errors': [f'草稿画像 id 非法：{pid!r}']}
+
         pdir = root / 'profiles' / pid
-        pdir.mkdir(parents=True, exist_ok=True)
-        _chmod(pdir, 0o700)
-        _chmod(pdir.parent, 0o700)
+        if _published_here(pdir) and st.get('published_profile_id') != pid:
+            return {'ok': False, 'profile_id': None, 'warnings': [],
+                    'errors': [f'画像 {pid} 已存在且已发布，本向导不会覆盖它。'
+                               f'请在第 2 步换一个画像 id（例如 {pid}-2）后重新提交。']}
+
+        st['draft_profile_id'] = pid
+        st['draft_base'] = base
+        _write_root_state(root, st)
 
         profile['id'] = pid
         p_text = json.dumps(profile, ensure_ascii=False, indent=2) + '\n'
         y_text = cp._yaml().safe_dump(prefs, allow_unicode=True, sort_keys=False,
                                       default_flow_style=False, width=1000)
 
-        tmp_profile = pdir / '.profile.json.tmp'
-        tmp_prefs = pdir / '.prefs.yaml.tmp'
+        # 校验在临时目录完成：失败时不创建 profiles/<pid>/（不再留空目录导致 id 漂移）
+        tmpdir = root / 'state' / 'tmp'
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        _chmod(tmpdir, 0o700)
+        tmp_profile = tmpdir / f'{pid}.profile.json.tmp'
+        tmp_prefs = tmpdir / f'{pid}.prefs.yaml.tmp'
         tmp_profile.write_text(p_text, encoding='utf-8')
         tmp_prefs.write_text(y_text, encoding='utf-8')
 
@@ -684,39 +905,51 @@ def commit(profile: dict = None, prefs: dict = None, finalize: bool = True) -> d
                     'errors': [f'{e.get("code")} {e.get("path")} {e.get("message")}'
                                for e in errs] or ['validate_profile 校验失败']}
 
-        os.replace(tmp_profile, pdir / 'profile.json')
-        os.replace(tmp_prefs, pdir / 'prefs.yaml')
-        _chmod(pdir / 'profile.json', 0o600)
-        _chmod(pdir / 'prefs.yaml', 0o600)
+        pdir.mkdir(parents=True, exist_ok=True)
+        _chmod(pdir, 0o700)
+        _chmod(pdir.parent, 0o700)
+        try:
+            os.replace(tmp_profile, pdir / 'profile.json')
+            os.replace(tmp_prefs, pdir / 'prefs.yaml')
+            _chmod(pdir / 'profile.json', 0o600)
+            _chmod(pdir / 'prefs.yaml', 0o600)
 
-        # 统一发布标记（与迁移共用）
-        pub = {
-            'schema_version': 1,
-            'profile_id': pid,
-            'published_at': _now(),
-            'source': 'onboarding',
-        }
-        cp.atomic_write(pdir / cp.PUBLISHED_NAME,
-                        json.dumps(pub, ensure_ascii=False, indent=2) + '\n', mode=0o600)
-        (pdir / 'state').mkdir(parents=True, exist_ok=True)
-        (pdir / 'state' / 'last_used_at').write_text(_now(), encoding='utf-8')
+            # 统一发布标记（与迁移共用）
+            pub = {
+                'schema_version': 1,
+                'profile_id': pid,
+                'published_at': _now(),
+                'source': 'onboarding',
+            }
+            cp.atomic_write(pdir / cp.PUBLISHED_NAME,
+                            json.dumps(pub, ensure_ascii=False, indent=2) + '\n', mode=0o600)
+            (pdir / 'state').mkdir(parents=True, exist_ok=True)
+            _chmod(pdir / 'state', 0o700)
+            (pdir / 'state' / 'last_used_at').write_text(_now(), encoding='utf-8')
 
-        cfg = cp.load_config()
-        cfg.setdefault('schema_version', 1)
-        cfg['active_profile'] = pid
-        if not cfg.get('work_root'):
-            cfg['work_root'] = str(root / 'work')
-        cfg.setdefault('dashboard', {'port': 8765})
-        cfg['onboarding'] = {
-            'completed': True,
-            'completed_at': _now(),
-            'source': 'onboarding',
-            'profile_id': pid,
-        }
-        cp.atomic_write(root / 'config.json',
-                        json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', mode=0o600)
+            cfg = cp.load_config()
+            cfg.setdefault('schema_version', 1)
+            cfg['active_profile'] = pid
+            if not cfg.get('work_root'):
+                cfg['work_root'] = str(root / 'work')
+            cfg.setdefault('dashboard', {'port': 8765})
+            cfg['onboarding'] = {
+                'completed': True,
+                'completed_at': _now(),
+                'source': 'onboarding',
+                'profile_id': pid,
+            }
+            cp.atomic_write(root / 'config.json',
+                            json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', mode=0o600)
+        except Exception as e:
+            _unlink(tmp_profile)
+            _unlink(tmp_prefs)
+            return {'ok': False, 'profile_id': pid, 'warnings': [],
+                    'errors': [f'发布失败（未写 published.json）：{e}']}
 
         st['published_profile_id'] = pid
+        st['draft_profile_id'] = None
+        st['draft_base'] = base
         st['profile_id'] = pid
         st['completed'] = True
         st['completed_at'] = _now()
@@ -725,6 +958,7 @@ def commit(profile: dict = None, prefs: dict = None, finalize: bool = True) -> d
 
     return {
         'ok': True,
+        'draft': False,
         'profile_id': pid,
         'warnings': [w.get('message') for w in report.get('warnings') or []],
         'errors': [],

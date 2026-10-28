@@ -56,6 +56,7 @@ SKILL_GREET = 'boss-auto-greet'
 
 _PROFILE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
 _LEGACY_WARNED = False
+_LEGACY_LITERAL_WARNED = False
 
 
 # ── 异常 ──────────────────────────────────────────────────
@@ -302,7 +303,8 @@ def resolve_profile_id(explicit=None) -> str:
         if not (profiles_dir() / pid).is_dir():
             raise ConfigError(
                 f'画像目录不存在：{profiles_dir() / pid}\n'
-                f'修复：python3 scripts/migrate_profile.py --profile {pid}'
+                f'修复：python3 scripts/onboard.py --status\n'
+                f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
             )
         return pid
 
@@ -315,8 +317,19 @@ def resolve_profile_id(explicit=None) -> str:
 
     cfg = load_config()
     active = cfg.get('active_profile')
-    if isinstance(active, str) and (profiles / active).is_dir():
-        return active
+    if isinstance(active, str) and active.strip():
+        try:
+            active_id = _norm_id(active)
+        except ConfigError:
+            # B3：配置里的 active_profile 一律过正则；非法值直接拒绝并给可读原因，
+            # 绝不把它当目录名拼进 profiles/<id>（防路径穿越）。
+            raise ConfigError(
+                f'config.json 的 active_profile 非法：{active!r}\n'
+                f'只允许 ^[a-z0-9][a-z0-9_-]{{0,31}}$（小写字母/数字/下划线/短横线）。\n'
+                f'修复：把 {root / CONFIG_NAME} 里的该键改成已有画像 id，或删除该键'
+            )
+        if (profiles / active_id).is_dir():
+            return active_id
 
     candidates = [d for d in profiles.iterdir() if d.is_dir() and not d.name.startswith('.')]
     if not candidates:
@@ -408,15 +421,23 @@ def profile_path(profile_id=None, require_published: bool = True) -> Path:
     p = d / 'profile.json'
     if not p.is_file():
         raise NeedOnboarding(
-            f'画像 {pid} 尚未生成 profile.json，请运行 '
-            f'python3 scripts/migrate_profile.py --profile {pid}'
+            f'画像 {pid} 尚未生成 profile.json。\n'
+            f'修复：python3 scripts/onboard.py --resume\n'
+            f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
         )
     if require_published:
         # 统一标记：published.json（迁移与向导都写）；migration.json 仅作 P2 兼容回退
         if not (d / PUBLISHED_NAME).is_file() and not (d / 'migration.json').is_file():
+            # A4：非迁移用户（没有 migration.json / backup）必须被指向向导，
+            # migrate_profile.py 只作为「旧版升级」的补充提示。
+            migrated = (d / 'backup').is_dir() or (d / 'migration.json').is_file()
+            hint = 'python3 scripts/onboard.py --resume'
+            if migrated:
+                hint = (f'python3 scripts/migrate_profile.py --profile {pid} --verify'
+                        f'\n  或重新走向导：python3 scripts/onboard.py --resume')
             raise ProfileNotPublished(
-                f'画像 {pid} 未完成发布（缺少 published.json），请重跑 '
-                f'python3 scripts/migrate_profile.py --profile {pid} 或重新走向导'
+                f'画像 {pid} 未完成发布（缺少 published.json）。\n'
+                f'修复：{hint}'
             )
     return p
 
@@ -429,8 +450,9 @@ def prefs_path(profile_id=None) -> Path:
     p = root / 'profiles' / pid / 'prefs.yaml'
     if not p.is_file():
         raise NeedOnboarding(
-            f'画像 {pid} 缺少 prefs.yaml，请运行 '
-            f'python3 scripts/migrate_profile.py --profile {pid}'
+            f'画像 {pid} 缺少 prefs.yaml。\n'
+            f'修复：python3 scripts/onboard.py --resume\n'
+            f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
         )
     return p
 
@@ -464,6 +486,64 @@ def legacy_available() -> bool:
     except ConfigError:
         return False
     return (d / 'candidate_profile.json').is_file()
+
+
+def legacy_literals() -> dict:
+    """v1.1 冻结的 K11–K15 词表（templates/legacy_literals.yaml）。
+
+    用途：
+      1) 迁移时 matcher.py 已无内联字面量、源 match_config.yaml 也没有 title_bias；
+      2) 运行期 legacy 回退，避免「空词表 = 闸门静默关闭」改变旧判定。
+    缺失时抛可读 ConfigError（调用方据此给两条修复命令），绝不返回空表。
+    """
+    p = skill_dir(SKILL_MATCHER) / 'templates' / 'legacy_literals.yaml'
+    if not p.is_file():
+        raise ConfigError(
+            f'缺少旧判定词表快照：{p}\n'
+            '修复（二选一）：\n'
+            '  1) 若 skill 来自 git 仓库：git -C <job-match-priority 目录> '
+            'checkout HEAD -- templates/legacy_literals.yaml\n'
+            '  2) 重新安装/拷贝 job-match-priority skill（模板随仓库分发）'
+        )
+    d = read_yaml(p) or {}
+    tb = d.get('title_bias') or {}
+    return {
+        'title_bias': {
+            'strong_keywords': list(tb.get('strong_keywords') or []),
+            'senior_title_keywords': list(tb.get('senior_title_keywords') or []),
+            'core_dimensions': sorted(tb.get('core_dimensions') or []),
+        },
+        'dimension_aliases': dict(d.get('dimension_aliases') or {}),
+        'quality_gates': dict(d.get('quality_gates') or {}),
+    }
+
+
+def _apply_legacy_literals(cfg: dict, path) -> dict:
+    """legacy 模式补齐 title_bias / dimension_aliases / quality_gates。
+
+    C3：缺 title_bias 时**不得**让闸门静默关闭。旧判定（v1.1）是硬编码闸门，
+    这里套用同一份冻结词表 = 与升级前判定一致；只打一次 warning 提示迁移。
+    """
+    global _LEGACY_LITERAL_WARNED
+    lit = legacy_literals()
+    need = False
+    tb = cfg.get('title_bias')
+    if not isinstance(tb, dict) or not tb.get('strong_keywords'):
+        cfg['title_bias'] = dict(lit['title_bias'])
+        need = True
+    if not isinstance(cfg.get('dimension_aliases'), dict) or not cfg.get('dimension_aliases'):
+        cfg['dimension_aliases'] = dict(lit['dimension_aliases'])
+        need = True
+    if not isinstance(cfg.get('quality_gates'), dict) or not cfg.get('quality_gates'):
+        cfg['quality_gates'] = dict(lit['quality_gates'])
+        need = True
+    if need and not _LEGACY_LITERAL_WARNED:
+        _LEGACY_LITERAL_WARNED = True
+        print(f'[legacy] 旧配置缺 title_bias/维度别名/质量闸门：已套用 v1.1 冻结词表'
+              f'（判定与升级前一致）：{path}\n'
+              f'[legacy] 建议固化：python3 scripts/migrate_profile.py --profile <id>',
+              file=sys.stderr)
+    return cfg
 
 
 def _legacy_profile_path() -> Path:
@@ -632,7 +712,7 @@ def effective_config(profile_id=None) -> dict:
         if not p.is_file():
             raise ConfigError(f'旧配置缺失：{p}')
         _warn_legacy(f'使用 skill 内配置 {p}')
-        return read_yaml(p)
+        return _apply_legacy_literals(read_yaml(p), p)
 
     prefs = load_prefs(profile_id)
     engine = prefs.get('engine') or {}

@@ -25,6 +25,7 @@ import http.server
 import json
 import os
 import csv
+import hashlib
 import sys
 import threading
 import urllib.parse
@@ -48,6 +49,63 @@ os.environ['NO_PROXY'] = '127.0.0.1,localhost' + (',' + _PROXY_OLD if _PROXY_OLD
 os.environ['no_proxy'] = os.environ['NO_PROXY']
 
 DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dashboard')
+DASHBOARD_SERVICE = 'boss-pipeline-dashboard'
+
+
+def _home_fingerprint() -> str:
+    """home 指纹（不含路径/画像等任何个人数据），供启动器校验 8765 复用。"""
+    try:
+        home = os.environ.get('BOSS_PIPELINE_HOME') or str(config_paths.DEFAULT_HOME)
+        real = os.path.realpath(os.path.expanduser(home))
+        return hashlib.sha256(real.encode('utf-8')).hexdigest()[:16]
+    except Exception:
+        return ''
+
+
+def _safe_parts(raw_path: str):
+    """把 URL path 拆成安全相对片段；含绝对路径 / .. / 反斜杠 / NUL 一律拒绝。"""
+    raw = urllib.parse.unquote(raw_path or '')
+    if raw.startswith('//') or raw.startswith('/') or '\\' in raw or '\x00' in raw:
+        return None
+    parts = [p for p in raw.split('/') if p not in ('', '.')]
+    if any(p == '..' for p in parts):
+        return None
+    return parts
+
+
+def _safe_join(base: str, *parts) -> str | None:
+    """拼接并确认真实路径在 base 内部（防 ../ 与符号链接逃逸）。"""
+    if not base:
+        return None
+    base_real = os.path.realpath(base)
+    clean = []
+    for p in parts:
+        if p is None:
+            return None
+        p = str(p)
+        if not p or p in ('.', '..') or os.path.isabs(p) or '\\' in p or os.sep in p:
+            return None
+        clean.append(p)
+    real = os.path.realpath(os.path.join(base_real, *clean))
+    if real != base_real and not real.startswith(base_real + os.sep):
+        return None
+    return real
+
+
+def _safe_static_path(url_path: str) -> str | None:
+    """B2：静态文件只允许 DASHBOARD_DIR 内部（绝对路径/../编码变体全部 404）。"""
+    raw = url_path or ''
+    if raw.startswith('//'):
+        return None
+    if raw.startswith('/'):
+        raw = raw[1:]
+    parts = _safe_parts(raw)
+    if parts is None:
+        return None
+    real = _safe_join(DASHBOARD_DIR, *parts) if parts else os.path.realpath(DASHBOARD_DIR)
+    if not real or not os.path.isfile(real):
+        return None
+    return real
 
 # ── 统一配置路径（P2：解耦个人路径）───────────────────────
 import config_paths  # 同目录，脚本/模块导入两种方式都在 sys.path 上
@@ -620,7 +678,9 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
             # 轮次还不存在（如任务刚建/未启动）：给监控根目录，
             # 各数据文件缺失时 jobs_cache 自然返回空列表，前端显空态，不会串到别的任务
             return mdir
-        # session 格式为 "YYYY-MM-DD-XXX"
+        # session 格式为 "YYYY-MM-DD-XXX"（SER-02：同样拒绝 / \ ..）
+        if any(s in session_name for s in ('/', '\\', '..')) or session_name.startswith('.'):
+            return DashboardHandler.output_dir
         candidate = os.path.join(DashboardHandler.history_root, session_name, '01_raw')
         if os.path.isdir(candidate):
             return candidate
@@ -860,12 +920,52 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
             i += 1
         return f'{base}-{i}'
 
+    # ── 安全头（B1/B2）：Host 白名单防 DNS rebinding；路径穿越在静态层统一拦 ──
+    def _host_allowed(self) -> bool:
+        host = (self.headers.get('Host') or '').strip().lower()
+        if not host:
+            return True
+        if host.startswith('['):
+            name = host.split(']')[0] + ']'
+        elif host.count(':') == 1 and host.rsplit(':', 1)[1].isdigit():
+            name = host.rsplit(':', 1)[0]
+        else:
+            name = host
+        return name in ('127.0.0.1', 'localhost', '[::1]', '::1')
+
+    def _dir_allowed(self, path: str) -> bool:
+        """只允许 history_root / output_dir 内部的目录。"""
+        if not path:
+            return False
+        real = os.path.realpath(path)
+        for root in (DashboardHandler.history_root, DashboardHandler.output_dir):
+            if not root:
+                continue
+            r = os.path.realpath(root)
+            if real == r or real.startswith(r + os.sep):
+                return True
+        return False
+
     def do_GET(self):
+        if not self._host_allowed():
+            return self.send_error(403)
+        # 绝对路径/协议相对路径直接 404（含 // + 盘符/家目录形式）
+        if self.path.startswith('//'):
+            return self.send_error(404)
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.lstrip('/')
         qs = urllib.parse.parse_qs(parsed.query)
         session = qs.get('session', [None])[0]
         dir_ = self._resolve_session_dir(session)
+
+        # /api/health → 轻量健康检查（home 指纹，无个人数据；D1）
+        if path == 'api/health':
+            return self._json_response({
+                'ok': True,
+                'service': DASHBOARD_SERVICE,
+                'home_fingerprint': _home_fingerprint(),
+                'pid': os.getpid(),
+            })
 
         # /api/stats/global → 全局统计（跨 session 去重汇总）
         if path == 'api/stats/global':
@@ -1014,6 +1114,8 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
         # ── Onboarding 向导（P4）──
         if path == 'api/onboarding/state':
             return self._onb_state()
+        if path == 'api/onboarding/draft':
+            return self._onb_draft()
         if path == 'api/onboarding/env':
             return self._onb_env()
 
@@ -1021,14 +1123,16 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
         if path in ('', 'index.html'):
             return self._serve_file(os.path.join(DASHBOARD_DIR, 'index.html'), 'text/html', cache=False)
 
-        # 其他静态文件
-        file_path = os.path.join(DASHBOARD_DIR, path)
-        if os.path.isfile(file_path):
+        # 其他静态文件（B2：只允许 DASHBOARD_DIR 内部，拒绝绝对路径/../编码变体）
+        file_path = _safe_static_path(parsed.path)
+        if file_path:
             return self._serve_file(file_path)
 
         self.send_error(404)
 
     def do_POST(self):
+        if not self._host_allowed():
+            return self.send_error(403)
         # M-7: localhost-only CSRF 防线——浏览器跨站 POST 会带 Origin，非本机一律拒绝
         origin = self.headers.get('Origin') or ''
         if origin and not (
@@ -1172,7 +1276,11 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def _serve_json(self, dir_: str, filename: str):
-        filepath = os.path.join(dir_, filename)
+        if not self._dir_allowed(dir_):
+            return self._json_response({'error': 'forbidden path'}, 400)
+        filepath = _safe_join(dir_, filename)
+        if not filepath:
+            return self._json_response({})
         if not os.path.exists(filepath):
             if filename == 'priorities.json':
                 return self._json_response({})
@@ -1182,7 +1290,6 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
                 data = f.read()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(data.encode('utf-8'))
@@ -1447,6 +1554,8 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
     def _serve_detail(self, dir_: str, job_id):
         if not job_id:
             return self._json_response({"error": "missing job_id"}, 400)
+        if not self._dir_allowed(dir_):
+            return self._json_response({"error": "forbidden path"}, 400)
         import glob
         mapping, _src = self._load_judgment_map(dir_)
         csv_files = glob.glob(os.path.join(dir_, 'jobs_data*.csv'))
@@ -2086,7 +2195,10 @@ class DashboardHandler(OnboardingMixin, http.server.SimpleHTTPRequestHandler):
             body = json.dumps(data, ensure_ascii=False, default=str).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        # B1：不发送 Access-Control-Allow-Origin（仅同源可读）；
+        # 跨域脚本读不到向导答案/画像信息。
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(body)
 

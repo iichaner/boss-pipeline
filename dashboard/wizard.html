@@ -74,6 +74,9 @@
   .dims .dim span { font-size: 12px; }
   .dims .dim input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
   .dims .dim input:focus { outline: none; border-color: var(--accent); }
+  .field input.bad, .field select.bad, .dims .dim input.bad { border-color: var(--red) !important; }
+  .ferr { color: #fca5a5; font-size: 11px; margin: -4px 0 8px 180px; display: none; }
+  .dims + .ferr, .dim + .ferr { margin-left: 150px; }
 
   .errors { margin-top: 12px; }
   .errors .e {
@@ -312,8 +315,13 @@ function init() {
       showDone(d.profile_id);
       return;
     }
-    if (d.answers) fillForm(d.answers);
-    go(d.step || 1);
+    // B1：答案不再随 state 返回，表单回填走 /api/onboarding/draft
+    api('api/onboarding/draft').then(function (dr) {
+      var answers = (dr.data && dr.data.answers) || {};
+      if (answers && Object.keys(answers).length) { fillForm(answers); } else { buildDims({}); }
+      attachLive();
+      go(d.step || 1);
+    });
   });
 }
 
@@ -381,6 +389,110 @@ function buildDims(answers) {
     '</div>';
   });
   document.getElementById('dimsWrap').innerHTML = h;
+  attachLive();
+}
+
+/* ── A1：逐字段即时校验（中文提示，不等到提交）── */
+function splitList(s) {
+  return String(s || '').split(/[,，、;；]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+}
+
+function setFieldError(el, msg) {
+  if (!el) return;
+  var box = el.closest('.field') || el.closest('.dim');
+  if (!box) return;
+  el.classList.toggle('bad', !!msg);
+  var next = box.nextElementSibling;
+  if (!next || !next.classList || !next.classList.contains('ferr')) {
+    next = document.createElement('div');
+    next.className = 'ferr';
+    box.parentNode.insertBefore(next, box.nextSibling);
+  }
+  next.textContent = msg || '';
+  next.style.display = msg ? 'block' : 'none';
+}
+
+function validateOne(el) {
+  if (!el) return true;
+  var v = el.value, msg = '';
+  var id = el.id || '';
+  if (id === 'f_profile_id') {
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(String(v || '').trim().toLowerCase())) {
+      msg = '画像 id 只允许小写字母/数字/_/-，且以字母或数字开头（≤32 位）';
+    }
+  } else if (id === 'f_display_name') {
+    var s = String(v || '').trim();
+    if (!s) msg = '称呼必填';
+    else if (s.length > 40) msg = '称呼不能超过 40 字';
+  } else if (id === 'f_total_years') {
+    var n = Number(v);
+    if (v === '' || isNaN(n) || n < 0 || n > 60) msg = '工作年限必须在 0–60 之间';
+  } else if (id === 'f_english') {
+    var e = Number(v);
+    if (v === '' || isNaN(e) || e < 0 || e > 5) msg = '英语等级必须在 0–5 之间';
+  } else if (id === 'f_roles') {
+    var rs = splitList(v);
+    if (!rs.length) msg = '目标岗位至少填 1 个';
+    else {
+      var badR = rs.filter(function (x) { return x.length < 2; });
+      if (badR.length) msg = '目标岗位「' + badR[0] + '」太短：至少 2 个字';
+    }
+  } else if (id === 'f_cities') {
+    if (!splitList(v).length) msg = '期望城市至少填 1 个';
+  } else if (id === 'f_salary_min' || id === 'f_salary_max') {
+    var sv = Number(v);
+    if (v === '' || isNaN(sv) || sv < 1 || sv > 500) msg = '薪资必须在 1–500K 之间';
+    else {
+      var a = Number(document.getElementById('f_salary_min').value);
+      var b = Number(document.getElementById('f_salary_max').value);
+      if (!isNaN(a) && !isNaN(b) && a > b) msg = '薪资下限不能大于上限';
+    }
+  } else if (el.getAttribute('data-role') === 'kw') {
+    var name = DIMS[Number(el.getAttribute('data-dim'))];
+    var ws = splitList(v);
+    var bad = ws.filter(function (x) { return x.length < 2; });
+    if (bad.length) msg = '「' + name + '」的关键词「' + bad[0] + '」太短：至少 2 个字';
+  }
+  setFieldError(el, msg);
+  return !msg;
+}
+
+function attachLive() {
+  var els = document.querySelectorAll('#sec2 input, #sec2 select');
+  for (var i = 0; i < els.length; i++) {
+    if (els[i].getAttribute('data-live') === '1') continue;
+    els[i].setAttribute('data-live', '1');
+    els[i].addEventListener('input', function () { validateOne(this); });
+    els[i].addEventListener('blur', function () { validateOne(this); });
+  }
+}
+
+function validateStep2Form() {
+  var ok = true, first = null;
+  ['f_profile_id', 'f_display_name', 'f_total_years', 'f_english',
+   'f_roles', 'f_cities', 'f_salary_min', 'f_salary_max'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el && !validateOne(el)) { ok = false; first = first || el; }
+  });
+  var selects = document.querySelectorAll('#dimsWrap select[data-role=level]');
+  var inputs = document.querySelectorAll('#dimsWrap input[data-role=kw]');
+  for (var i = 0; i < selects.length; i++) {
+    var lv = parseInt(selects[i].value, 10) || 0;
+    var nameDim = DIMS[i];
+    var inp = inputs[i];
+    if (lv > 0) {
+      if (!inp || !splitList(inp.value).length) {
+        setFieldError(inp, '「' + nameDim + '」已自评 ' + lv + ' 分，但没填关键词（至少 1 个，每个 ≥2 字）');
+        ok = false; first = first || inp;
+      } else if (!validateOne(inp)) { ok = false; first = first || inp; }
+    } else if (inp) { setFieldError(inp, ''); }
+  }
+  var box = document.getElementById('step2Errors');
+  if (!ok) {
+    if (box) box.innerHTML = '<div class="e">有字段未通过校验，请按红色提示修正后再继续。</div>';
+    if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); first.focus(); }
+  } else if (box) { box.innerHTML = ''; }
+  return ok;
 }
 
 function fillForm(a) {
@@ -401,10 +513,6 @@ function fillForm(a) {
   var flt = a.filters || {};
   document.getElementById('f_ex_industries').value = (flt.exclude_industries || []).join(', ');
   buildDims(a);
-}
-
-function splitList(s) {
-  return String(s || '').split(/[,，、;；]+/).map(function (x) { return x.trim(); }).filter(Boolean);
 }
 
 function collectStep2() {
@@ -455,6 +563,7 @@ function collectStep2() {
 }
 
 function step2Next() {
+  if (!validateStep2Form()) return;
   var btn = document.getElementById('step2Next');
   btn.disabled = true;
   var answers = collectStep2();
@@ -588,7 +697,9 @@ function finish() {
       btn.disabled = false;
       var d = r.data || {};
       if (!r.ok || !d.ok) {
-        return showErrors(5, { errors: d.errors || [d.error || '提交失败'] });
+        showErrors(5, { errors: d.errors || [d.error || '提交失败'] });
+        if (d.fix_step) go(d.fix_step);
+        return;
       }
       showDone(d.profile_id);
     });
