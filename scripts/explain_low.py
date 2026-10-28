@@ -11,7 +11,7 @@
     python3 scripts/explain_low.py --cause zombie       # 只看某一类原因
     python3 scripts/explain_low.py --cause keywords --profile-id me
 
---cause 取值：role / city / salary / industry / zombie / keywords / other / all（默认 all）
+--cause 取值：role / city / salary / industry / zombie / quality / keywords / other / all（默认 all）
 
 退出码：0 = 分析完成（是否有 low 不影响退出码）；2 = 找不到可读的结果文件。
 """
@@ -22,6 +22,7 @@ import argparse
 import csv
 import glob
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -59,6 +60,14 @@ CAUSES = {
         'generic 出厂已关闭；若画像 prefs 里显式开了，改成空对象/空词表即可'
         '（rules.hard_filters.zombie_*）',
     ),
+    'quality': (
+        ('超配', '复核降级', '命中条目', '能力条目不足'),
+        '没被硬过滤，但「匹配质量」降了档：命中能力条目 <4 个，'
+        '或岗位要求低于你的资历（超配 / 复核降级）',
+        '看「能力条目得分」列：命中少于 4 个就先补维度关键词 / 调整自评深度；'
+        '理由是「超配」说明岗位级别低于你的资历，换更匹配级别的岗位，'
+        '或接受它被判 low——这类不是补关键词或降阈值能修的',
+    ),
     'keywords': (
         (),  # 兜底：没有硬过滤但档位仍低
         '没有被硬过滤，但能力关键词命中太少 / 自评偏低 / 阈值偏高',
@@ -72,7 +81,11 @@ CAUSES = {
     ),
 }
 
-ORDER = ['role', 'city', 'salary', 'industry', 'zombie', 'keywords']
+ORDER = ['role', 'city', 'salary', 'industry', 'zombie', 'quality', 'keywords']
+
+#: 与 matcher 出厂 quality_gates.min_items_for_high 一致；命中条数低于它时
+#: 即使匹配度高也会先降档，属于「质量」而不是「关键词」问题。
+QUALITY_MIN_ITEMS = 4
 
 
 def _latest_result() -> str:
@@ -99,11 +112,41 @@ def _read(path: str):
         return list(csv.DictReader(f))
 
 
-def _classify(reason: str) -> str:
-    for key in ORDER:
+def _item_count(row) -> int:
+    """结果 CSV 的「能力条目得分」是空格分隔的维度得分串。"""
+    raw = str((row or {}).get('能力条目得分') or '').strip()
+    return len(raw.split()) if raw else 0
+
+
+def _match_pct(reason: str):
+    m = re.search(r'匹配度\s*([0-9]+(?:\.[0-9]+)?)', reason or '')
+    try:
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _classify(reason: str, row=None, min_pct: float = 90.0) -> str:
+    """按「实际主因」归类：硬过滤 → 质量降档 → 其它硬过滤 → 关键词。
+
+    quality 的关键证据有两种：
+    1) 理由里明确写了超配 / [复核降级]；
+    2) 匹配度已达到 medium 以上，但命中能力条目 <4（被质量闸门先降档）。
+    """
+    for key in ('role', 'city', 'salary', 'industry', 'zombie'):
         kws = CAUSES[key][0]
         if kws and any(k in reason for k in kws):
             return key
+    if any(k in reason for k in CAUSES['quality'][0]):
+        return 'quality'
+    # 命中条目不足只有在「没有别的降级信号」时才是主因；经验/薪资降级
+    # 属于另一条链路，不能因为条目少就误报成补关键词。
+    other_signal = any(k in reason for k in ('经验错配', '薪资不足', 'AI加分'))
+    if row is not None and not other_signal:
+        items = _item_count(row)
+        pct = _match_pct(reason)
+        if 0 < items < QUALITY_MIN_ITEMS and pct is not None and pct >= min_pct:
+            return 'quality'
     if '硬过滤' in reason:
         return 'other'
     return 'keywords'
@@ -148,16 +191,31 @@ def main(argv=None) -> int:
     thr = _thresholds(args.profile_id) if args.profile_id else None
     if thr:
         print(f'当前阈值：high={thr.get("high")}, medium={thr.get("medium")}')
+    min_pct = 90.0
+    if thr and thr.get('medium') is not None:
+        try:
+            min_pct = float(thr['medium'])
+        except Exception:
+            pass
 
     reasons = Counter()
     buckets = Counter()
+    quality_detail = Counter()
     lows = 0
     for r in rows:
         lv = (r.get('优先级判断') or '').strip().lower()
         reason = (r.get('优先级判断理由') or '').strip()
         if lv == 'low':
             lows += 1
-            buckets[_classify(reason)] += 1
+            key = _classify(reason, r, min_pct)
+            buckets[key] += 1
+            if key == 'quality':
+                if '超配' in reason:
+                    quality_detail['超配'] += 1
+                elif '复核降级' in reason:
+                    quality_detail['复核降级'] += 1
+                else:
+                    quality_detail['命中条目不足'] += 1
         if reason:
             reasons[reason] += 1
 
@@ -173,6 +231,10 @@ def main(argv=None) -> int:
             continue
         _, why, fix = CAUSES[key]
         print(f'  · [{key}] {n} 条 —— {why}')
+        if key == 'quality' and quality_detail:
+            detail = '、'.join(f'{k} {v} 条'
+                              for k, v in quality_detail.most_common())
+            print(f'    （其中：{detail}）')
         print(f'    ↳ 处置：{fix}')
 
     print('\n出现最多的理由（前 8）：')

@@ -807,7 +807,10 @@ def dry_run_plan(st: dict = None) -> dict:
     st = st or load_state()
     pv = preview(build_profile(st), build_prefs(st))
     targets = [i for i in pv.get('items') or [] if i['level'] in ('high', 'medium')]
-    message = DEFAULT_GREETING
+    # 预览必须是人能直接读的成品：把 {job} 换成首个目标岗位名，
+    # 没有目标岗位时用「该岗位」，绝不把花括号占位符漏给用户。
+    job_title = (targets[0].get('jd_title') or '').strip() if targets else ''
+    message = DEFAULT_GREETING.replace('{job}', job_title or '该岗位')
     return {
         'dry_run': True,
         'sent': 0,

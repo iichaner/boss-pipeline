@@ -717,7 +717,8 @@ function buildDryRun() {
   var box = document.getElementById('dryBox');
   var items = (lastPreview && lastPreview.items) || [];
   var targets = items.filter(function (i) { return i.level === 'high' || i.level === 'medium'; });
-  var msg = '您好，看到贵司在招{岗位}，我的经历与岗位要求比较匹配，方便的话想和您进一步沟通，谢谢！';
+  var jobName = targets.length ? (targets[0].jd_title || '该岗位') : '该岗位';
+  var msg = '您好，看到贵司在招' + jobName + '，我的经历与岗位要求比较匹配，方便的话想和您进一步沟通，谢谢！';
   var h = '<div class="okbox">dry-run：本步骤只生成计划，<strong>不会真实发送</strong>。后端还会再校验 dry_run=True。</div>';
   h += '<div style="margin:10px 0 6px;font-size:12px;color:var(--dim)">将向 ' + targets.length + ' 条高/中优先级岗位打招呼：</div>';
   if (targets.length) {

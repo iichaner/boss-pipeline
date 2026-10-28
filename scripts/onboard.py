@@ -458,6 +458,9 @@ def main() -> int:
         return 0
     if args.answers:
         return run_answers(args.answers)
+    if args.step is not None and not (1 <= args.step <= oc.STEPS):
+        ap.error(f'--step 必须是 1–{oc.STEPS} 之间的整数（收到 {args.step}）；'
+                 f'想看进度用 --status')
     return run_interactive(args.step)
 
 

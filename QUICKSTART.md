@@ -298,11 +298,11 @@ python3 ../boss-auto-greet/scripts/boss_auto_greet.py \
 ```bash
 python3 ../job-match-priority/scripts/run_match.py \
   --profile-id "$PROFILE" \
-  --input ../job-match-priority/templates/samples/jds_onboarding.json \
+  --input ../job-match-priority/templates/samples/jd_onboarding.json \
   --out /tmp/jd_preview.csv
 ```
 
-`jds_onboarding.json` 是 6 条中性岗位（运营/技术/职能各 2 条），
+`jd_onboarding.json` 是 6 条中性岗位（运营/技术/职能各 2 条），
 **仅用于预演**：公司名是「示例…」，薪资写「面议」，不含任何真实招聘信息或个人数据。
 用它跑出来的档位只说明「你的画像对这三类岗位的区分度」，不代表真实市场结果。
 

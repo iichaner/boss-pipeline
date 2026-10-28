@@ -208,8 +208,8 @@ def check_port(port: int = 8765):
         return _check('port', f'端口 {port}', False,
                       f'被另一套数据占用（本地指纹 {local_fp or "未知"} / '
                       f'远端 {remote_fp}），不是本 Dashboard',
-                      f'双击启动器会自动换端口（8765–8775）；'
-                      f'想固定用本套数据：先关掉占用 {port} 的实例')
+                      f'不用管它：双击启动器会自动换端口（8765–8775），'
+                      f'优先使用空闲端口；不要结束不认识的进程')
 
     detail = '已被占用（不是 boss-pipeline Dashboard）'
     try:
@@ -223,7 +223,8 @@ def check_port(port: int = 8765):
     except Exception:
         pass
     return _check('port', f'端口 {port}', False, detail,
-                  f'lsof -nP -iTCP:{port} -sTCP:LISTEN  # 找到后关闭占用进程')
+                  f'不用管它：双击启动器会自动换端口（8765–8775），'
+                  f'无需结束其他程序')
 
 
 def check_config():
