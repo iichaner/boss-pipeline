@@ -3,8 +3,17 @@
 # 与双击版 Boss直聘监控.command 的区别：不开浏览器、不依赖终端，开机自启 + 崩溃自恢复，
 # 长期监控任务的调度线程就跑在这个进程里，所以它必须一直活着。
 
-SKILL_DIR="$HOME/.agents/skills/boss-pipeline"
-WORKSPACE="$HOME/.openclaw/workspace/boss直聘一体化"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# 用户数据根与产物根（P2 解耦）：BOSS_PIPELINE_HOME → 默认 ~/.boss-pipeline；
+# 产物根优先级：BOSS_PIPELINE_WORK_ROOT > config.json.work_root > <home>/work
+PIPELINE_HOME="${BOSS_PIPELINE_HOME:-$HOME/.boss-pipeline}"
+WORKSPACE="${BOSS_PIPELINE_WORK_ROOT:-}"
+if [ -z "$WORKSPACE" ] && [ -f "$PIPELINE_HOME/config.json" ]; then
+  WORKSPACE=$(plutil -extract work_root raw -o - "$PIPELINE_HOME/config.json" 2>/dev/null || true)
+fi
+[ -n "$WORKSPACE" ] || WORKSPACE="$PIPELINE_HOME/work"
+mkdir -p "$WORKSPACE" 2>/dev/null || true
 PORT="${BOSS_DASHBOARD_PORT:-8765}"
 LOG_DIR="$HOME/Library/Logs/boss-pipeline"
 mkdir -p "$LOG_DIR"

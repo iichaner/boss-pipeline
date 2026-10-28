@@ -49,6 +49,9 @@ os.environ['no_proxy'] = os.environ['NO_PROXY']
 
 DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dashboard')
 
+# ── 统一配置路径（P2：解耦个人路径）───────────────────────
+import config_paths  # 同目录，脚本/模块导入两种方式都在 sys.path 上
+
 # ── 优先级判定监控模块 ──────────────────────────────────────
 try:
     from judge_monitor import judge_monitor
@@ -189,7 +192,7 @@ class CrawlManager:
 
         cmd = [
             sys.executable,
-            os.path.expanduser('~/.agents/skills/boss-resume-crawler/scripts/boss_extract_cdp.py'),
+            str(config_paths.crawler_script()),
             '--output', output_dir,
         ]
         if target_url:
@@ -249,7 +252,7 @@ class CrawlManager:
 
         cmd = [
             sys.executable,
-            os.path.expanduser('~/.agents/skills/boss-auto-greet/scripts/boss_auto_greet.py'),
+            str(config_paths.greet_script()),
             '--csv', csv_path,
         ]
         if params.get('message'):
@@ -1483,8 +1486,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if ok and body.strip():
             return self._json_response({'ok': True, 'already': True})
 
-        binary = os.path.expanduser('~/.cache/cloakbrowser/Chromium.app/Contents/MacOS/Chromium')
-        profile = os.path.expanduser('~/.cache/cloakbrowser/profile-boss')
+        binary = str(config_paths.browser_binary())
+        profile = str(config_paths.browser_profile())
         if not os.path.isfile(binary):
             return self._json_response({'error': f'CloakBrowser 二进制不存在: {binary}'}, 500)
 
@@ -1697,7 +1700,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             'running': running, 'byJob': by_job
         })
 
-    GREETINGS_DIR = os.path.expanduser('~/.agents/skills/boss-auto-greet/greetings')
+    @property
+    def GREETINGS_DIR(self):
+        """打招呼语目录（P2：走 config_paths，不再硬编码到 boss-auto-greet skill）。"""
+        try:
+            return str(config_paths.greetings_dir())
+        except Exception:
+            return ''
 
     def _greeting_files(self):
         """列出可用打招呼语 MD 文件 + 当前来源。"""
@@ -2023,7 +2032,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         # 读取打招呼语：前端传的优先，否则从默认 MD 文件
         message = data.get('message', '')
         if not message:
-            default_md = os.path.expanduser('~/.agents/skills/boss-auto-greet/greetings/default.md')
+            default_md = os.path.join(self.GREETINGS_DIR, 'default.md')
             if os.path.isfile(default_md):
                 with open(default_md, 'r', encoding='utf-8') as f:
                     message = f.read().strip()

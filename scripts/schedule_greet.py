@@ -20,14 +20,18 @@ T5 辅助脚本：构建 cron 打招呼任务的参数。
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_GREETING = "您好，看到贵司在招的岗位很感兴趣，我的背景和经验比较匹配，希望能有机会进一步沟通~"
 
-GREET_SCRIPT = os.path.expanduser(
-    "~/.agents/skills/boss-auto-greet/scripts/boss_auto_greet.py"
-)
+
+def greet_script_path() -> str:
+    """打招呼脚本路径（P2：走 config_paths，不再硬编码 skill 目录）。"""
+    import config_paths
+    return str(config_paths.greet_script())
 
 
 def parse_time_input(time_str: str, reference: datetime = None) -> str:
@@ -115,7 +119,7 @@ def build_greet_cron_job(
 
     # 构建命令
     cmd_parts = [
-        f"python3 {GREET_SCRIPT}",
+        f"python3 {greet_script_path()}",
         f'--csv "{result_csv}"',
     ]
     if greeting != DEFAULT_GREETING:

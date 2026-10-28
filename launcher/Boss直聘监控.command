@@ -3,7 +3,7 @@
 # 双击启动 Dashboard + 自动打开浏览器
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILL_DIR="$HOME/.agents/skills/boss-pipeline"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_SCRIPT="$SKILL_DIR/scripts/serve_dashboard.py"
 
 # launchd 常驻服务优先：8765 已活着就直接开浏览器，不再起第二个服务
@@ -26,7 +26,15 @@ done
 
 # 默认 output-dir：最新一次性 session（20*/ 日期前缀，排除 长期- 监控目录：
 # 它顶层没有 01_raw，会被误当最新 session 导致默认视图/历史根全部错位）
-WORKSPACE="$HOME/.openclaw/workspace/boss直聘一体化"
+# 用户数据根与产物根（P2 解耦）：BOSS_PIPELINE_HOME → 默认 ~/.boss-pipeline；
+# 产物根优先级：BOSS_PIPELINE_WORK_ROOT > config.json.work_root > <home>/work
+PIPELINE_HOME="${BOSS_PIPELINE_HOME:-$HOME/.boss-pipeline}"
+WORKSPACE="${BOSS_PIPELINE_WORK_ROOT:-}"
+if [ -z "$WORKSPACE" ] && [ -f "$PIPELINE_HOME/config.json" ]; then
+  WORKSPACE=$(plutil -extract work_root raw -o - "$PIPELINE_HOME/config.json" 2>/dev/null || true)
+fi
+[ -n "$WORKSPACE" ] || WORKSPACE="$PIPELINE_HOME/work"
+mkdir -p "$WORKSPACE" 2>/dev/null || true
 LATEST=$(ls -td "$WORKSPACE"/20*/ 2>/dev/null | head -1)
 OUTPUT_DIR="${LATEST}01_raw"
 

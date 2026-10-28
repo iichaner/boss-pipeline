@@ -19,17 +19,32 @@ import threading
 import time
 from datetime import datetime
 
-# ── 加载 job-match-priority 引擎 ──────────────────────────
-MATCHER_SKILL_DIR = os.path.expanduser('~/.agents/skills/job-match-priority')
-MATCHER_SCRIPTS_DIR = os.path.join(MATCHER_SKILL_DIR, 'scripts')
-MATCHER_CONFIG_DIR = os.path.join(MATCHER_SKILL_DIR, 'config')
+# ── 加载 job-match-priority 引擎（P2：路径与配置全部走 config_paths）──
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 将 matcher 脚本目录加入 sys.path
-if MATCHER_SCRIPTS_DIR not in sys.path:
+try:
+    import config_paths
+    import profile_adapter
+    CONFIG_PATHS_AVAILABLE = True
+    _CONFIG_PATHS_ERROR = None
+except Exception as _e:  # pragma: no cover
+    config_paths = None
+    profile_adapter = None
+    CONFIG_PATHS_AVAILABLE = False
+    _CONFIG_PATHS_ERROR = str(_e)
+
+MATCHER_SCRIPTS_DIR = None
+try:
+    if CONFIG_PATHS_AVAILABLE:
+        MATCHER_SCRIPTS_DIR = str(config_paths.matcher_scripts_dir())
+except Exception as _e:  # 引擎 skill 缺失时不让整个模块导入失败
+    _CONFIG_PATHS_ERROR = str(_e)
+
+if MATCHER_SCRIPTS_DIR and MATCHER_SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, MATCHER_SCRIPTS_DIR)
 
 try:
-    from matcher import load_profile, load_config, Matcher, enrich_jd
+    from matcher import Matcher, enrich_jd
     MATCHER_AVAILABLE = True
 except ImportError as e:
     MATCHER_AVAILABLE = False
@@ -247,6 +262,7 @@ class JudgeMonitor:
 
     def __init__(self):
         self._matcher = None
+        self._profile_id = None
         self._lock = threading.Lock()
         self._monitor_thread = None
         self._monitor_running = False
@@ -260,22 +276,25 @@ class JudgeMonitor:
             'error': None,
         }
 
-        # 尝试加载 matcher 引擎
-        if MATCHER_AVAILABLE:
+        # 尝试加载 matcher 引擎（C01-C03：不再硬编码 skill 内 config 路径）
+        if MATCHER_AVAILABLE and CONFIG_PATHS_AVAILABLE:
             try:
-                profile_path = os.path.join(MATCHER_CONFIG_DIR, 'candidate_profile.json')
-                config_path = os.path.join(MATCHER_CONFIG_DIR, 'match_config.yaml')
-                if os.path.isfile(profile_path) and os.path.isfile(config_path):
-                    profile = load_profile(profile_path)
-                    config = load_config(config_path)
-                    self._matcher = Matcher(profile, config)
-                    print("[judge_monitor] matcher 引擎加载成功")
-                else:
-                    print("[judge_monitor] 配置文件不存在，matcher 不可用")
+                # 不先 resolve_profile_id：legacy 回退模式下没有 profiles/ 目录也要能跑
+                profile = profile_adapter.to_legacy_profile(config_paths.load_profile())
+                config = config_paths.effective_config()
+                self._matcher = Matcher(profile, config)
+                try:
+                    self._profile_id = config_paths.resolve_profile_id()
+                except Exception:
+                    self._profile_id = 'legacy'
+                print(f"[judge_monitor] matcher 引擎加载成功（profile={self._profile_id}）")
             except Exception as e:
-                print(f"[judge_monitor] matcher 引擎加载失败: {e}")
-        else:
+                # 未迁移 / 未初始化 / 配置不完整都在这里给出可读原因，不抛 traceback
+                print(f"[judge_monitor] matcher 引擎不可用: {type(e).__name__}: {e}")
+        elif not MATCHER_AVAILABLE:
             print(f"[judge_monitor] matcher 模块导入失败: {_MATCHER_IMPORT_ERROR}")
+        else:
+            print(f"[judge_monitor] config_paths 不可用: {_CONFIG_PATHS_ERROR}")
 
     @property
     def available(self) -> bool:
@@ -287,6 +306,7 @@ class JudgeMonitor:
         return {
             **self._status,
             'available': self.available,
+            'profile_id': self._profile_id,
             'monitor_running': self._monitor_running,
         }
 
