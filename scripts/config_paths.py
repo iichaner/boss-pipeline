@@ -301,10 +301,12 @@ def resolve_profile_id(explicit=None) -> str:
     if explicit:
         pid = _norm_id(explicit)
         if not (profiles_dir() / pid).is_dir():
+            # P1-4：只给一条可执行路径。新用户没有可迁移的旧配置，
+            # 旧版的 migrate_profile 提示对他们是死路（且需要旧 skill 目录）。
             raise ConfigError(
                 f'画像目录不存在：{profiles_dir() / pid}\n'
-                f'修复：python3 scripts/onboard.py --status\n'
-                f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
+                f'修复：python3 scripts/onboard.py --status   '
+                f'# 看已有画像 id；没有就跑一遍向导创建'
             )
         return pid
 
@@ -422,8 +424,7 @@ def profile_path(profile_id=None, require_published: bool = True) -> Path:
     if not p.is_file():
         raise NeedOnboarding(
             f'画像 {pid} 尚未生成 profile.json。\n'
-            f'修复：python3 scripts/onboard.py --resume\n'
-            f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
+            f'修复：python3 scripts/onboard.py --resume'
         )
     if require_published:
         # 统一标记：published.json（迁移与向导都写）；migration.json 仅作 P2 兼容回退
@@ -451,8 +452,7 @@ def prefs_path(profile_id=None) -> Path:
     if not p.is_file():
         raise NeedOnboarding(
             f'画像 {pid} 缺少 prefs.yaml。\n'
-            f'修复：python3 scripts/onboard.py --resume\n'
-            f'（旧版配置升级：python3 scripts/migrate_profile.py --profile {pid}）'
+            f'修复：python3 scripts/onboard.py --resume'
         )
     return p
 

@@ -149,6 +149,25 @@ def collect_step2(prev: dict = None) -> dict:
     ex_ind = _ask_list('排除的行业（可空）',
                        ', '.join(p_flt.get('exclude_industries') or []))
 
+    # P1-5：档位阈值可调（默认 95/90），显式写入 prefs.engine.scoring.thresholds。
+    p_eng = prev.get('engine') if isinstance(prev.get('engine'), dict) else {}
+    p_sc = p_eng.get('scoring') if isinstance(p_eng.get('scoring'), dict) else {}
+    p_thr = p_sc.get('thresholds') if isinstance(p_sc.get('thresholds'), dict) else {}
+    d_hi = p_thr.get('high', oc.DEFAULT_THRESHOLDS['high'])
+    d_mid = p_thr.get('medium', oc.DEFAULT_THRESHOLDS['medium'])
+    print('\n高级（可选）：档位阈值，越高越严格')
+    print('  high = 判「高优先级」的最低匹配度；medium = 判「中优先级」的最低匹配度')
+    thr_hi = _ask_num('  high 阈值（1–100）', d_hi, 1, 100, 'high 阈值')
+    thr_mid = _ask_num('  medium 阈值（1–100，须小于 high）', d_mid, 1, 100, 'medium 阈值')
+    while not (0 < thr_mid < thr_hi <= 100):
+        print(f'  ↳ 阈值必须满足 0 < medium < high ≤ 100（当前 medium={thr_mid}, high={thr_hi}）')
+        if _EOF_SEEN:
+            thr_hi, thr_mid = oc.DEFAULT_THRESHOLDS['high'], oc.DEFAULT_THRESHOLDS['medium']
+            print('    （输入已结束，已改回默认 95/90）')
+            break
+        thr_hi = _ask_num('  high 阈值（重填）', d_hi, 1, 100, 'high 阈值')
+        thr_mid = _ask_num('  medium 阈值（重填）', d_mid, 1, 100, 'medium 阈值')
+
     print('\n能力自评：0=没有 1=了解 2=能执行 3=能独立负责 4=能搭体系 5=能定战略')
     dims, keywords, defs = {}, {}, {}
     for name_dim in oc.NEUTRAL_DIMENSIONS:
@@ -188,8 +207,31 @@ def collect_step2(prev: dict = None) -> dict:
         'capabilities': {'dimensions': dims},
         'dimension_keywords': keywords,
         'dimension_definitions': defs,
-        'engine': {},
+        'engine': {'scoring': {'thresholds': {'high': thr_hi, 'medium': thr_mid}}},
     }
+
+
+def _is_publish_confirmed(raw) -> bool:
+    """N1：只有显式 y / yes 才算确认发布（回车、任意键都算取消）。"""
+    return str(raw or '').strip().lower() in ('y', 'yes')
+
+
+def _print_publish_summary(st: dict) -> None:
+    """N1：发布前回显摘要，给用户最后一次反悔机会。"""
+    a = st.get('answers') or {}
+    ident = a.get('identity') or {}
+    tgt = a.get('targets') or {}
+    sal = tgt.get('salary') or {}
+    thr = ((((a.get('engine') or {}).get('scoring') or {}).get('thresholds')) or {})
+    dims = (a.get('capabilities') or {}).get('dimensions') or {}
+    print('\n即将发布的画像：')
+    print(f'  画像 id   ：{a.get("profile_id") or "me"}')
+    print(f'  目标岗位  ：{"、".join(tgt.get("roles") or []) or "（空）"}')
+    print(f'  城市/薪资 ：{"、".join(tgt.get("cities") or []) or "（空）"}'
+          f' / {sal.get("min_k", "?")}–{sal.get("max_k", "?")}K')
+    print(f'  档位阈值  ：high={thr.get("high", oc.DEFAULT_THRESHOLDS["high"])}, '
+          f'medium={thr.get("medium", oc.DEFAULT_THRESHOLDS["medium"])}')
+    print('  能力自评  ：' + ('；'.join(f'{k}={v}' for k, v in dims.items()) or '（空）'))
 
 
 def _ask_optional_definition(name_dim: str) -> str:
@@ -262,8 +304,24 @@ def run_interactive(step_override: int = None) -> int:
             answers = {'url': raw} if raw else {'skipped': True}
         else:
             plan = oc.dry_run_plan(st)
+            _print_publish_summary(st)
             print(f'dry-run：将向 {plan["would_send"]} 条高/中优先级岗位打招呼（不会真发）')
-            if _ask('按回车确认 dry-run 并完成（b=回第 4 步）', '').strip().lower() == 'b':
+            # N1：发布前必须显式输入 y/yes。回车、任意其他键都视为取消并重问，
+            # 避免「误触一下就发布」——发布后画像 id 会被占住。
+            confirmed = False
+            while True:
+                raw = _ask('确认发布？输入 y 确认，b=回第 4 步（其他输入=取消并重问）', '')
+                ans = str(raw).strip().lower()
+                if _is_publish_confirmed(raw):
+                    confirmed = True
+                    break
+                if ans == 'b':
+                    break
+                if _EOF_SEEN:
+                    print('  输入已结束，未发布。重新运行：python3 scripts/onboard.py --resume')
+                    return 2
+                print('  ↳ 已取消本次发布（未写入任何内容）。确认请输入 y 或 yes。')
+            if not confirmed:
                 oc.rewind_to(4)
                 st = oc.load_state()
                 continue

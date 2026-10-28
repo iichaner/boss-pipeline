@@ -36,6 +36,16 @@ curl -s http://127.0.0.1:9222/json/version
 正常会返回一段 JSON（含 `"Browser"` 和 `"webSocketDebuggerUrl"`）。
 返回空或报错 → 关闭所有测试用浏览器窗口，回到 Dashboard 点「🚀 启动浏览器」重新拉起。
 
+爬取前想一次确认「CDP + 页面 + 登录」三件事，跑爬取自检（不抓取、不写文件）：
+
+```bash
+python3 ../boss-resume-crawler/scripts/boss_extract_cdp.py \
+  --url "<列表页URL>" --dry-run-check
+```
+
+退出码：0 可以开始爬；4 CDP 不通；5 列表页打不开；8 未登录。
+爬取失败也会返回非 0（6 没有职位卡片、7 一条都没写入 CSV），不会再静默成功。
+
 ---
 
 ## 2. 未登录 / 登录过期
@@ -75,11 +85,14 @@ python3 scripts/env_check.py
 **一条命令**
 
 ```bash
-lsof -nP -iTCP:8765 -sTCP:LISTEN
+curl -s http://127.0.0.1:8765/api/health
 ```
 
-- 进程是 `python` / `Python`：大概率就是本 Dashboard，直接访问 `http://localhost:8765` 即可，不要再起第二个。
-- 是别的程序：关掉它，或让启动器自己往后找端口（它会自动尝试 8765–8775）。
+看返回里的 `home_fingerprint` 和自检里的「端口 8765」那一行：
+
+- 指纹与本地一致（自检显示「已被本 Dashboard 占用（home 指纹一致 …）」）：就是本套数据，直接访问 `http://localhost:8765`，不要再起第二个。
+- 指纹不同 / 返回 404 或非 JSON：这是另一套数据或别的程序。**不要直接用它**，双击启动器会自动在 8765–8775 里找一个空闲端口，并优先复用同指纹的实例。
+- 想彻底释放端口：`lsof -nP -iTCP:8765 -sTCP:LISTEN` 找到 pid 后关闭对应进程。
 
 ---
 
@@ -93,21 +106,65 @@ medium：0 条（0%）
 low：<N> 条（100%）
 ```
 
-**原因**（按概率排序）
+**判定全 low 的五个原因**（每个给一条排查命令）
 
-1. 能力维度没有关键词：JD 永远命中不了任何维度
-2. 画像的维度键不在 taxonomy 里，或自评深度普遍低于 JD 要求
-3. 阈值设得太高，或硬过滤（城市/薪资/学历/标题）把所有岗位都否掉了
-4. 目标岗位关键词与 JD 标题对不上，被标题闸门降档
-
-**一条命令**
+先把最近一次结果准备好：
 
 ```bash
+RESULT=$(ls -t ~/.boss-pipeline/work/20*/02_result/*判定结果*.csv | head -1)
+```
+
+### 4.1 角色/标题不匹配（岗位方向被闸门否掉）
+
+现象：理由里大量 `硬过滤：岗位方向不匹配`。标题必须命中「目标岗位关键词」之一。
+
+```bash
+python3 scripts/explain_low.py --result "$RESULT" --cause role
+```
+
+修：向导第 2 步「目标岗位关键词」补上真实会出现的标题词（≥2 字）。
+
+### 4.2 城市 / 薪资不匹配
+
+现象：`硬过滤：城市不符` 或 `硬过滤：薪资完全不覆盖`。后者在「只看高薪岗」时几乎必现。
+
+```bash
+python3 scripts/explain_low.py --result "$RESULT" --cause city
+python3 scripts/explain_low.py --result "$RESULT" --cause salary
+```
+
+修：第 2 步改期望城市/薪资；异地可远程就勾「接受远程」。
+
+### 4.3 行业排除
+
+现象：`硬过滤：行业…` / 专业资质类理由。常见于「排除的行业」写得太宽（例如写了「互联网」）。
+
+```bash
+python3 scripts/explain_low.py --result "$RESULT" --cause industry
+```
+
+修：第 2 步「排除的行业」只留真正不能接受的行业。
+
+### 4.4 僵尸岗规则（JD 短 + 高薪 / 标题特征 / 壳公司）
+
+现象：`硬过滤：僵尸岗位(空泛高薪)` 等。**新画像出厂已关闭**；只有画像 prefs 里显式开了才会命中。
+
+```bash
+python3 scripts/explain_low.py --result "$RESULT" --cause zombie
+```
+
+修：把 `rules.hard_filters.zombie_empty_highpay` 改成 `{}`（或把 `zombie_title_keywords` 置空），规则机制仍在，只是不再默认误杀。
+
+### 4.5 taxonomy 关键词太少 / 自评偏低 / 阈值偏高
+
+现象：没有任何硬过滤，`匹配度` 低。能力维度没词 = JD 永远命中不了；阈值默认 95/90，偏高。
+
+```bash
+python3 scripts/explain_low.py --result "$RESULT" --cause keywords --profile-id "$PROFILE"
 python3 ../job-match-priority/scripts/validate_profile.py ~/.boss-pipeline/profiles/$PROFILE/profile.json
 ```
 
-先看有没有 `E-DIM-*`（维度不在 taxonomy）和 `W-TAX-001`（维度没关键词）。
-没有硬错误但仍全 low，回向导第 2 步补关键词、核对目标岗位和期望城市/薪资；阈值在向导里也能改。
+修：第 2 步补关键词与自评；阈值在同一步「高级（可选）」里改（默认 `high=95, medium=90`，要求 `0 < medium < high ≤ 100`）。
 
 判定方法细节见 `../job-match-priority/FRAMEWORK.md`。
 

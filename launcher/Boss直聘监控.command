@@ -71,30 +71,51 @@ p = os.path.realpath(os.path.expanduser(sys.argv[1]))
 print(hashlib.sha256(p.encode('utf-8')).hexdigest()[:16])
 PY
 )"
-if lsof -nP -i :8765 -sTCP:LISTEN >/dev/null 2>&1; then
-  REMOTE_FP="$(curl -s --max-time 2 http://127.0.0.1:8765/api/health 2>/dev/null \
-    | "$PYTHON_BIN" -c 'import sys,json;print((json.load(sys.stdin) or {}).get("home_fingerprint",""))' 2>/dev/null || true)"
-  if [ -n "$HOME_FP" ] && [ "$REMOTE_FP" = "$HOME_FP" ]; then
-    echo "▶ 检测到常驻服务已在 8765 运行，且 home 指纹一致（同一套数据），直接打开浏览器"
-    if [ "$CONFIG_READY" != "1" ]; then
-      open "http://localhost:8765/wizard.html"
-    else
-      open "http://localhost:8765"
+# N2：不再只看 8765。逐个扫 8765–8775 的 /api/health，
+# 命中同指纹就复用（无论它落在哪个端口），遇到别人的数据就跳过，绝不重复起实例。
+REUSE_PORT=""
+CONFLICT=""
+FREE_PORT=""
+for p in $(seq 8765 8775); do
+  if lsof -nP -iTCP:$p -sTCP:LISTEN >/dev/null 2>&1; then
+    REMOTE_FP="$(curl -s --max-time 2 "http://127.0.0.1:$p/api/health" 2>/dev/null \
+      | "$PYTHON_BIN" -c 'import sys,json;print((json.load(sys.stdin) or {}).get("home_fingerprint",""))' 2>/dev/null || true)"
+    if [ -n "$HOME_FP" ] && [ "$REMOTE_FP" = "$HOME_FP" ]; then
+      REUSE_PORT="$p"
+      break
     fi
-    exit 0
+    CONFLICT="$CONFLICT $p:${REMOTE_FP:-未知}"
+    continue
   fi
-  echo "⚠️ 8765 被另一套数据占用（home 指纹：本地 ${HOME_FP:-未知} / 远端 ${REMOTE_FP:-未知}）"
-  echo "   → 不复用该服务，自动换到下一个空闲端口"
+  [ -n "$FREE_PORT" ] || FREE_PORT="$p"
+done
+
+# 指纹一致（同一套数据）已在某个端口运行 → 只开浏览器，不再起第二个实例
+if [ -n "$REUSE_PORT" ]; then
+  echo "▶ 检测到本套数据的 Dashboard 已在 $REUSE_PORT 运行（home 指纹一致），直接打开浏览器"
+  if [ "$CONFIG_READY" != "1" ]; then
+    open "http://localhost:$REUSE_PORT/wizard.html"
+  else
+    open "http://localhost:$REUSE_PORT"
+  fi
+  exit 0
 fi
 
-# 找可用端口（8765-8775）
-PORT=8765
-for p in $(seq 8765 8775); do
-  if ! lsof -i :$p >/dev/null 2>&1; then
-    PORT=$p
-    break
-  fi
-done
+if [ -n "$CONFLICT" ]; then
+  for item in $CONFLICT; do
+    echo "⚠️ ${item%%:*} 被另一套数据占用（home 指纹：本地 ${HOME_FP:-未知} / 远端 ${item#*:}）"
+  done
+  echo "   → 不复用这些服务；本套数据改用空闲端口"
+fi
+
+if [ -z "$FREE_PORT" ]; then
+  echo "❌ 8765–8775 全部被占用，无法启动 Dashboard"
+  echo "   查看占用：lsof -nP -iTCP:8765-8775 -sTCP:LISTEN"
+  echo "   处理：关闭不需要的实例后重新双击本启动器"
+  exit 1
+fi
+PORT="$FREE_PORT"
+echo "▶ 使用端口 $PORT"
 
 # 默认 output-dir：最新一次性 session（20*/ 日期前缀，排除 长期- 监控目录：
 # 它顶层没有 01_raw，会被误当最新 session 导致默认视图/历史根全部错位）

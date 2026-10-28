@@ -196,6 +196,15 @@
         </div>
 
         <div class="group">
+          <h3>高级（可选）</h3>
+          <div class="hint">档位阈值：匹配度 ≥ high 判「高」，≥ medium 判「中」，其余为「低」。默认 95/90，越高越严格；要求 0 &lt; medium &lt; high ≤ 100。不确定就保持默认。</div>
+          <div class="field two"><label>high 阈值</label>
+            <input type="number" id="f_thr_high" min="1" max="100" value="95"><span class="sep">/</span>
+            <input type="number" id="f_thr_medium" min="1" max="100" value="90"><span class="example">medium</span>
+          </div>
+        </div>
+
+        <div class="group">
           <h3>能力自评（0=不会，1=了解，2=能执行，3=能独立负责，4=能搭体系，5=能定战略）</h3>
           <div class="hint">至少 3 个维度自评 ≥1 且各填 1 个以上关键词；否则样例判定会全空。关键词用逗号分隔。</div>
           <div class="dims" id="dimsWrap"></div>
@@ -213,7 +222,7 @@
     <div class="section" id="sec3">
       <div class="panel">
         <h2>第 3 步 · 试判定</h2>
-        <div class="hint">用 3 条内置样例 JD 跑一遍本地判定（零 token）。看看档位是否符合直觉；不满意可以回第 2 步改关键词或自评。</div>
+        <div class="hint">用 6 条内置样例 JD（运营/技术/职能各 2 条，仅用于预演）跑一遍本地判定（零 token）。看看档位是否符合直觉；不满意可以回第 2 步改关键词、自评或阈值。</div>
         <div id="previewBox"><div class="muted">运行中…</div></div>
         <div class="actions">
           <button class="btn-ghost" onclick="go(2)">上一步</button>
@@ -244,9 +253,13 @@
         <h2>第 5 步 · 试打招呼（dry-run）</h2>
         <div class="hint">这一步<strong>只生成计划，不会真实发送任何消息</strong>。确认无误后点「完成配置」。</div>
         <div id="dryBox"><div class="muted">生成 dry-run 计划…</div></div>
+        <div class="group">
+          <div class="hint">为避免误触发布：请在下面输入 <strong>y</strong> 或 <strong>yes</strong>（其他输入不会发布）。</div>
+          <div class="field"><label>确认发布</label><input type="text" id="f_confirm" placeholder="输入 y 后按钮才可点" autocomplete="off"></div>
+        </div>
         <div class="actions">
           <button class="btn-ghost" onclick="go(4)">上一步</button>
-          <button class="btn-green" id="finishBtn" onclick="finish()">完成配置</button>
+          <button class="btn-green" id="finishBtn" onclick="finish()" disabled>完成配置</button>
         </div>
       </div>
     </div>
@@ -301,10 +314,26 @@ function go(step) {
   if (current === 3) runPreview();
   if (current === 4 && !envData) loadEnv();
   if (current === 5) {
+    // N1：每次进入第 5 步都要求重新输入确认词，按钮默认禁用。
+    var cf = document.getElementById('f_confirm');
+    var fb = document.getElementById('finishBtn');
+    if (cf) cf.value = '';
+    if (fb) fb.disabled = true;
     if (!lastPreview) { runPreview().then(function () { buildDryRun(); }); }
     else buildDryRun();
   }
   window.scrollTo(0, 0);
+}
+
+function confirmWord() {
+  var el = document.getElementById('f_confirm');
+  return el ? String(el.value || '').trim().toLowerCase() : '';
+}
+
+function syncFinishBtn() {
+  var ok = (confirmWord() === 'y' || confirmWord() === 'yes');
+  var btn = document.getElementById('finishBtn');
+  if (btn) btn.disabled = !ok;
 }
 
 function init() {
@@ -439,6 +468,16 @@ function validateOne(el) {
     }
   } else if (id === 'f_cities') {
     if (!splitList(v).length) msg = '期望城市至少填 1 个';
+  } else if (id === 'f_thr_high' || id === 'f_thr_medium') {
+    var tv = Number(v);
+    if (v === '' || isNaN(tv) || tv < 1 || tv > 100) msg = '阈值必须在 1–100 之间';
+    else {
+      var hi = Number(document.getElementById('f_thr_high').value);
+      var mid = Number(document.getElementById('f_thr_medium').value);
+      if (!isNaN(hi) && !isNaN(mid) && !(0 < mid && mid < hi && hi <= 100)) {
+        msg = '阈值必须满足 0 < medium < high ≤ 100（当前 medium=' + mid + ', high=' + hi + '）';
+      }
+    }
   } else if (id === 'f_salary_min' || id === 'f_salary_max') {
     var sv = Number(v);
     if (v === '' || isNaN(sv) || sv < 1 || sv > 500) msg = '薪资必须在 1–500K 之间';
@@ -470,7 +509,8 @@ function attachLive() {
 function validateStep2Form() {
   var ok = true, first = null;
   ['f_profile_id', 'f_display_name', 'f_total_years', 'f_english',
-   'f_roles', 'f_cities', 'f_salary_min', 'f_salary_max'].forEach(function (id) {
+   'f_roles', 'f_cities', 'f_salary_min', 'f_salary_max',
+   'f_thr_high', 'f_thr_medium'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el && !validateOne(el)) { ok = false; first = first || el; }
   });
@@ -512,6 +552,9 @@ function fillForm(a) {
   document.getElementById('f_ex_roles').value = (tgt.exclude_role_keywords || []).join(', ');
   var flt = a.filters || {};
   document.getElementById('f_ex_industries').value = (flt.exclude_industries || []).join(', ');
+  var thr = (((a.engine || {}).scoring || {}).thresholds) || {};
+  document.getElementById('f_thr_high').value = thr.high != null ? thr.high : 95;
+  document.getElementById('f_thr_medium').value = thr.medium != null ? thr.medium : 90;
   buildDims(a);
 }
 
@@ -558,7 +601,14 @@ function collectStep2() {
     capabilities: { dimensions: dims },
     dimension_keywords: kws,
     dimension_definitions: defs,
-    engine: {}
+    engine: {
+      scoring: {
+        thresholds: {
+          high: Number(document.getElementById('f_thr_high').value || 95),
+          medium: Number(document.getElementById('f_thr_medium').value || 90)
+        }
+      }
+    }
   };
 }
 
@@ -609,7 +659,7 @@ function runPreview() {
     });
     h += '</tbody></table>';
     if (!d.spread_ok) {
-      h += '<div class="warn">3 条样例只出现 1 种档位。可以回第 2 步补关键词/调整自评，让区分度更明显；也可以继续。</div>';
+      h += '<div class="warn">6 条样例只出现 1 种档位。可以回第 2 步补关键词/调整自评/调阈值，让区分度更明显；也可以继续。</div>';
     } else {
       h += '<div class="okbox">档位分布：' + esc((d.levels || []).join('、')) + ' —— 至少 2 种档位，判定有区分度。</div>';
     }
@@ -686,6 +736,10 @@ function buildDryRun() {
 }
 
 function finish() {
+  if (confirmWord() !== 'y' && confirmWord() !== 'yes') {
+    alert('为避免误触发布，请先在输入框里输入 y 或 yes。');
+    return;
+  }
   var btn = document.getElementById('finishBtn');
   btn.disabled = true;
   api('api/onboarding/answer', { step: 5, answers: { dry_run: true } }).then(function (res) {
@@ -708,6 +762,9 @@ function finish() {
 
 buildDims({});
 init();
+document.addEventListener('input', function (e) {
+  if (e && e.target && e.target.id === 'f_confirm') syncFinishBtn();
+});
 </script>
 </body>
 </html>

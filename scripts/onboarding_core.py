@@ -47,6 +47,10 @@ STEP_LABELS = {
 EDU_ENUM = ('大专', '本科', '硕士', '博士', '其他')
 PROFILE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
 
+#: 向导第 2 步「高级（可选）」暴露的档位阈值。默认沿用 ii 的现行值 95/90。
+#: 校验规则：0 < medium < high ≤ 100；只影响新建/修改的草稿，不碰已发布画像。
+DEFAULT_THRESHOLDS = {'high': 95, 'medium': 90}
+
 #: 向导暴露的 6 个中性维度（来自 templates/families/generic.yaml 的 dimensions_vocab）。
 NEUTRAL_DIMENSIONS = [
     '专业能力', '项目与流程管理', '数据能力', '沟通协作', '团队管理', '行业知识',
@@ -329,6 +333,8 @@ def _validate_profile_answers(a: dict) -> list:
         if iv < 0 or iv > 5:
             errors.append(f'维度「{k}」自评必须在 0–5 之间')
 
+    _validate_thresholds(a, errors)
+
     kw = a.get('dimension_keywords') or {}
     if not isinstance(kw, dict):
         errors.append('维度关键词必须是 {维度: [关键词…]}')
@@ -361,6 +367,36 @@ def _validate_profile_answers(a: dict) -> list:
 
 
 # ── 答案 → profile / prefs ────────────────────────────────
+def _validate_thresholds(a: dict, errors: list) -> None:
+    """engine.scoring.thresholds 校验（P1-5）：0 < medium < high ≤ 100。"""
+    eng = a.get('engine') or {}
+    if not isinstance(eng, dict):
+        errors.append('engine 必须是对象')
+        return
+    sc = eng.get('scoring')
+    if sc is None:
+        return
+    if not isinstance(sc, dict):
+        errors.append('engine.scoring 必须是对象')
+        return
+    thr = sc.get('thresholds')
+    if thr is None:
+        return
+    if not isinstance(thr, dict):
+        errors.append('engine.scoring.thresholds 必须是 {high, medium}')
+        return
+    hi = _num(thr.get('high'), '高级阈值 high', 1, 100, errors, allow_none=True)
+    mid = _num(thr.get('medium'), '中级阈值 medium', 1, 100, errors, allow_none=True)
+    if hi is None and mid is None:
+        return
+    if hi is None or mid is None:
+        errors.append('阈值必须同时给 high 和 medium（例：high=95, medium=90）')
+        return
+    if not (0 < mid < hi <= 100):
+        errors.append(
+            f'阈值必须满足 0 < medium < high ≤ 100（当前 medium={mid}, high={hi}）')
+
+
 def _profile_id_from(st_or_answers: dict) -> str:
     a = st_or_answers.get('answers') if 'answers' in st_or_answers else st_or_answers
     return str((a or {}).get('profile_id') or 'me').strip().lower()
@@ -413,6 +449,16 @@ def normalize_answers(a: dict) -> dict:
         if isinstance(d, dict):
             for k, v in list(d.items()):
                 d[k] = _list(v)
+    eng = out.get('engine')
+    if isinstance(eng, dict):
+        thr = ((eng.get('scoring') or {}).get('thresholds')
+               if isinstance(eng.get('scoring'), dict) else None)
+        if isinstance(thr, dict):
+            for k in ('high', 'medium'):
+                if k in thr:
+                    n = _num_or(thr.get(k))
+                    if n is not None:
+                        thr[k] = n
     return out
 
 
@@ -512,6 +558,22 @@ def build_prefs(st: dict) -> dict:
         'dimension_aliases': {},
     }
     engine = copy.deepcopy(a.get('engine') or {})
+    if not isinstance(engine, dict):
+        engine = {}
+    # P1-5：档位阈值走 orchestration 显式落盘（默认 95/90），
+    # 不再只靠 generic 的 80/60；用户没填也能在 wizard 里看到并改。
+    sc = engine.get('scoring')
+    if not isinstance(sc, dict):
+        sc = {}
+    thr = sc.get('thresholds')
+    if not isinstance(thr, dict):
+        thr = {}
+    merged_thr = dict(DEFAULT_THRESHOLDS)
+    for k in ('high', 'medium'):
+        if _num_or(thr.get(k)) is not None:
+            merged_thr[k] = _num_or(thr.get(k))
+    sc['thresholds'] = merged_thr
+    engine['scoring'] = sc
     return {
         'schema_version': 2,
         'extends': 'generic',
@@ -546,7 +608,7 @@ def _samples() -> list:
 
 
 def preview(profile: dict = None, prefs: dict = None) -> dict:
-    """用 3 条内置中性 JD 跑判定；返回档位 + 命中维度 + 硬过滤原因。"""
+    """用 6 条内置中性 JD（运营/技术/职能各 2 条）跑判定；返回档位 + 命中维度 + 硬过滤原因。"""
     st = load_state()
     if profile is None:
         profile = build_profile(st)

@@ -84,10 +84,10 @@ bash launcher/Boss直聘监控.command
 浏览器会自动打开向导页（`http://localhost:8765/wizard.html`）。按 5 步填写：
 
 1. **环境自检**：确认没有阻塞项，点下一步
-2. **偏好配置**：身份、目标岗位关键词、期望城市/薪资、能力自评。基本项有默认值；**能力自评必须填**（回车=0 分，会拉低全部档位），每个自评维度至少 1 个关键词（每个关键词 ≥2 字）。任何一项不合格都会在输入框下方直接标红并给中文原因，改完再继续
-3. **试判定**：用 3 条内置样例 JD 跑本地判定，看看档位是否符合直觉；不符合就回第 2 步补关键词
+2. **偏好配置**：身份、目标岗位关键词、期望城市/薪资、能力自评、档位阈值。基本项有默认值；**能力自评必须填**（回车=0 分，会拉低全部档位），每个自评维度至少 1 个关键词（每个关键词 ≥2 字）。任何一项不合格都会在输入框下方直接标红并给中文原因，改完再继续。「高级（可选）」里可改 `high` / `medium` 阈值（默认 95/90，要求 `0 < medium < high ≤ 100`）
+3. **试判定**：用 6 条内置样例 JD（运营/技术/职能各 2 条，仅用于预演）跑本地判定，看看档位是否符合直觉；不符合就回第 2 步补关键词/调阈值
 4. **试爬取（可选）**：只爬 5 条，可以直接跳过
-5. **试打招呼（dry-run）**：只生成计划，不会真的发送
+5. **试打招呼（dry-run）**：只生成计划，不会真的发送；确认发布要**手动输入 `y` 或 `yes`**（回车或其它键都视为取消，避免误触）
 
 中途关掉浏览器不会丢进度，重新打开会从断点继续。
 
@@ -149,7 +149,24 @@ python3 scripts/env_check.py
 2. 回到 Dashboard，点「🕷️ 新建爬取任务」，粘贴 URL，确认开始
 3. 页面会显示滚动进度和已抓条数；产物写入 `~/.boss-pipeline/work/YYYY-MM-DD-<搜索词>/01_raw/`
 
-也可以只爬 5 条做连通性测试（命令行）：
+先跑一次爬取自检（不抓取、不写文件，10 秒）：
+
+```bash
+python3 ../boss-resume-crawler/scripts/boss_extract_cdp.py \
+  --url "<列表页URL>" --dry-run-check
+```
+
+它只会检查 CDP / 页面 / 登录，并用中文告诉你卡在哪一步：
+
+```
+✅ CDP 调试端口 9222：已连通
+✅ 列表页：https://www.zhipin.com/web/geek/jobs?query=...
+✅ 登录状态：已登录
+✅ 职位卡片：30 条
+自检完成：可以开始爬取。
+```
+
+自检通过后再只爬 5 条做连通性测试（命令行）：
 
 ```bash
 python3 ../boss-resume-crawler/scripts/boss_extract_cdp.py \
@@ -157,6 +174,17 @@ python3 ../boss-resume-crawler/scripts/boss_extract_cdp.py \
   --output ~/.boss-pipeline/work/$(date +%F)-手动 \
   --max-scroll 3 --max-jobs 5
 ```
+
+失败会返回非 0 退出码并给一条修复命令，不再静默 exit 0：
+
+| 退出码 | 含义 |
+|--------|------|
+| 0 | 成功（至少写入 1 条 CSV；或本次无新增但已有 CSV） |
+| 4 | 连不上 CDP 9222 |
+| 5 | 打不开/找不到列表页（有 `--url` 时会自动开新标签页导航） |
+| 6 | 列表页没有职位卡片（风控/验证页） |
+| 7 | 一条都没写入 CSV |
+| 8 | 未登录 |
 
 预期结尾：
 
@@ -263,9 +291,39 @@ python3 ../boss-auto-greet/scripts/boss_auto_greet.py \
 
 ---
 
+## 7. 没有 Boss 账号也能试（本地判定预演）
+
+只想先验证「判定引擎」是否靠谱，不需要登录、不需要爬取：
+
+```bash
+python3 ../job-match-priority/scripts/run_match.py \
+  --profile-id "$PROFILE" \
+  --input ../job-match-priority/templates/samples/jds_onboarding.json \
+  --out /tmp/jd_preview.csv
+```
+
+`jds_onboarding.json` 是 6 条中性岗位（运营/技术/职能各 2 条），
+**仅用于预演**：公司名是「示例…」，薪资写「面议」，不含任何真实招聘信息或个人数据。
+用它跑出来的档位只说明「你的画像对这三类岗位的区分度」，不代表真实市场结果。
+
+想用 CSV 版本演练下游（打招呼 dry-run）：
+
+```bash
+python3 ../job-match-priority/scripts/run_match.py \
+  --profile-id "$PROFILE" \
+  --input ../job-match-priority/sample/jds_sample.csv \
+  --out /tmp/jd_sample_result.csv
+python3 ../boss-auto-greet/scripts/boss_auto_greet.py --csv /tmp/jd_sample_result.csv --dry-run
+```
+
+后者只列出名单，不连浏览器、不发送。样例行的 `job_id` 是占位值，
+`https://www.zhipin.com/job_detail/sample-00x` 打不开——这里只演示「名单 + 档位」格式。
+
+---
+
 ## 跑通之后
 
 - 日常只需要：双击启动器 → 粘 URL → 爬取 → 「⚡ 进行全量判定」→ dry-run 确认 → 发送
-- 想调阈值、加关键词、换岗位方向：重新打开 `/wizard.html` 或跑 `python3 scripts/onboard.py`
+- 想调阈值、加关键词、换岗位方向：重新打开 `/wizard.html` 或跑 `python3 scripts/onboard.py`（阈值在第 2 步「高级（可选）」）
 - 判定方法说明：`../job-match-priority/FRAMEWORK.md`
 - 出问题：`TROUBLESHOOTING.md`

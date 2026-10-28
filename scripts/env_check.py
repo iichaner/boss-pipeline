@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -156,6 +157,36 @@ def check_login():
                   '在浏览器窗口里扫码登录 Boss 直聘')
 
 
+def home_fingerprint() -> str:
+    """与 serve_dashboard._home_fingerprint / 启动器同算法：sha256(realpath(home))[:16]。
+
+    只用路径算，不含画像/姓名/薪资等任何个人数据。
+    """
+    try:
+        p = os.environ.get('BOSS_PIPELINE_HOME') or str(cp.DEFAULT_HOME)
+        real = os.path.realpath(os.path.expanduser(p))
+        return hashlib.sha256(real.encode('utf-8')).hexdigest()[:16]
+    except Exception:
+        return ''
+
+
+def _health_fingerprint(port: int) -> str:
+    """读运行中服务的 /api/health 指纹；不是本服务/读不到返回空串。"""
+    try:
+        import http.client
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+        conn.request('GET', '/api/health')
+        resp = conn.getresponse()
+        body = resp.read().decode('utf-8')
+        conn.close()
+        data = json.loads(body)
+        if isinstance(data, dict) and data.get('service') == 'boss-pipeline-dashboard':
+            return str(data.get('home_fingerprint') or '')
+    except Exception:
+        pass
+    return ''
+
+
 def check_port(port: int = 8765):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.0)
@@ -165,20 +196,30 @@ def check_port(port: int = 8765):
         return _check('port', f'端口 {port}', True, f'空闲（Dashboard 尚未启动时可 bind）')
     except OSError:
         s.close()
-    detail = '已被占用'
+
+    # P1-1：端口被占不等于「是本 Dashboard」——必须比对 home 指纹。
+    local_fp = home_fingerprint()
+    remote_fp = _health_fingerprint(port)
+    if remote_fp and local_fp and remote_fp == local_fp:
+        return _check('port', f'端口 {port}', True,
+                      f'已被本 Dashboard 占用（home 指纹一致 {local_fp}），'
+                      f'直接打开 http://localhost:{port} 即可')
+    if remote_fp:
+        return _check('port', f'端口 {port}', False,
+                      f'被另一套数据占用（本地指纹 {local_fp or "未知"} / '
+                      f'远端 {remote_fp}），不是本 Dashboard',
+                      f'双击启动器会自动换端口（8765–8775）；'
+                      f'想固定用本套数据：先关掉占用 {port} 的实例')
+
+    detail = '已被占用（不是 boss-pipeline Dashboard）'
     try:
         out = subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'],
                              capture_output=True, text=True, timeout=5).stdout
         lines = [ln for ln in out.splitlines() if ln.strip()]
-        proc = '未知进程'
         if len(lines) >= 2:
             parts = lines[1].split()
             if len(parts) >= 2:
-                proc = f'{parts[0]} (pid {parts[1]})'
-        detail = f'已被 {proc} 占用'
-        if 'python' in proc.lower():
-            return _check('port', f'端口 {port}', True,
-                          f'{detail}，看起来是本 Dashboard，可继续')
+                detail = f'已被 {parts[0]} (pid {parts[1]}) 占用（不是本 Dashboard）'
     except Exception:
         pass
     return _check('port', f'端口 {port}', False, detail,
@@ -194,9 +235,10 @@ def check_config():
     else:
         detail = '未初始化用户数据目录' if home is None else ''
     if home is None:
-        return _check('config', '配置就绪（画像 + 偏好）', False,
-                      detail or '未找到 ~/.boss-pipeline',
-                      'python3 scripts/onboard.py  # 走向导创建画像')
+        # N6：同一项只给一条建议（指向向导），不再同时给 unset/mkdir 两条互相矛盾的路。
+        first = (detail or '未找到 ~/.boss-pipeline').splitlines()[0]
+        return _check('config', '配置就绪（画像 + 偏好）', False, first,
+                      'python3 scripts/onboard.py  # 走向导（会创建用户数据目录）')
     try:
         profile = cp.load_profile()
         prefs = cp.load_prefs()
@@ -208,10 +250,12 @@ def check_config():
         return _check('config', '配置就绪（画像 + 偏好）', False, str(e),
                       'python3 scripts/onboard.py  # 或 migrate_profile.py --profile <id>')
     except cp.NeedOnboarding as e:
-        return _check('config', '配置就绪（画像 + 偏好）', False, str(e),
-                      'python3 scripts/onboard.py')
+        return _check('config', '配置就绪（画像 + 偏好）', False,
+                      str(e).splitlines()[0],
+                      'python3 scripts/onboard.py  # 走向导创建画像')
     except Exception as e:
-        return _check('config', '配置就绪（画像 + 偏好）', False, str(e),
+        return _check('config', '配置就绪（画像 + 偏好）', False,
+                      str(e).splitlines()[0],
                       'python3 scripts/onboard.py  # 重新生成画像')
 
 
